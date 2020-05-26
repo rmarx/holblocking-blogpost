@@ -2,13 +2,50 @@
 
 As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols are finally approaching official standardization. Preview versions are now [available for testing in servers and browsers alike](https://ma.ttias.be/how-run-http-3-with-caddy-2/). 
 
-HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its transport protocol from TCP to QUIC](https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/). In this post, we'll be taking an in-depth look at just one of these improvements, namely the promised removal of the "Head-of-Line blocking" (HOL blocking) problem. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. 
+HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC](https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/). In this post, we'll be taking an in-depth look at just one of these improvements, namely the promised removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/2 but also HTTP/3 and QUIC. 
 
 I'll first introduce the problem and then track different forms of it throughout HTTP's history. Spoiler: much like the [cake](https://knowyourmeme.com/memes/the-cake-is-a-lie), HOL blocking removal in HTTP/3 is probably a lie. 
 
 ## What is Head-of-Line blocking?
 
+It's difficult to give you a single technical definition of HOL blocking, as this blogpost alone describes four different variations of it. A simple, conceptual definition however would be:
+
+> When a single (slow) object prevents other/following objects from making progress
+
+A good real-life metaphore would be a grocery store with just a single check-out counter. One customer who's buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example could be a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at he "head of the line" can "block" the entire line. 
+
+As it turns out, that concept has been one of the hardest Web performance problems to solve. To understand this, lets start at its incarnation in our trusted workhorse: HTTP version 1.1 
+
 ## HOL blocking in HTTP/1.1
+
+HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be text-based and readable on the wire. This is illustrated in Figure 1 below:
+
+[TODO: Figure 1]
+*Figure 1: server HTTP/1.1 response for `script.js`*
+
+In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is really straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content, that's it. Headers + content are then passed down to the underlying TCP (orange) for actual transport to the receiver. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
+
+*Note: in reality, when using HTTPS, there is another layer in between for security, with the TLS protocol. However, we omit that in our discussion here for clarity. If you want to know more about how TLS impacts things, see the [bonus section at the end of this post](TODO bonus section).* 
+
+Now let's see what happens when the browser also requests `style.css` in Figure 2:
+
+[TODO: Figure 2]
+*Figure 2: server HTTP/1.1  response for `script.js` and `style.css`*
+
+In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. In this case, the headers and content for `style.css` are simply appended after the JavaScript file. The receiver uses the **Content-Length** header for each response to know where one ends and the other starts (in our simplified example, `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
+
+All of that seems sensible enough. But let's consider what happens if we would like to send the JavaScript and CSS **at the same time**? (we will discuss [later in this blogpost](TODO scheduling) whether that's a good idea in practice or not). 
+
+
+
+
+
+
+cannot be done, so browsers open parallel connections to get around this. 
+
+
+- note that Figure 2 is actually showing pipelined requests. Otherwise, data for `script.js` and `style.css` couldn't share packet 2. 
+
 
 - one response at a time
 - because data is passed raw to TCP (or TLS, doesn't matter) without framing
@@ -29,6 +66,8 @@ I'll first introduce the problem and then track different forms of it throughout
 - This does get rid of Transport-layer HOL blocking due to packet loss, because each stream does retransmits individually
 - Or does it...
 
+- Note: we abstract away a lot. Normally, the sizes of the FRAMES would count as well, but we omit those here to get nice round numbers.
+
 - Consider that, per stream, data also needs to be delivered in-order of course (put differently: previously we were HOL blocked inter-stream, now only intra-stream)
 - Now, resource multiplexing comes into play: sequential vs RR 
 - we can see: if sequential = still holblocking, little benefit from QUIC
@@ -40,6 +79,10 @@ I'll first introduce the problem and then track different forms of it throughout
 - So... in theory: it's solved
 - In practice: the jury is still out. 
 - Either way: it's not much of an issue in practice, especially on fast networks
+
+## Bonus: TLS HOL blocking
+
+
 
 ## References
 
