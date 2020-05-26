@@ -14,7 +14,7 @@ It's difficult to give you a single technical definition of HOL blocking, as thi
 
 A good real-life metaphore would be a grocery store with just a single check-out counter. One customer who's buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example could be a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at he "head of the line" can "block" the entire line. 
 
-As it turns out, that concept has been one of the hardest Web performance problems to solve. To understand this, lets start at its incarnation in our trusted workhorse: HTTP version 1.1 
+As it turns out, that concept has been one of the hardest Web performance problems to solve. To understand this, let's start at its incarnation in our trusted workhorse: HTTP version 1.1 
 
 ## HOL blocking in HTTP/1.1
 
@@ -32,10 +32,17 @@ Now let's see what happens when the browser also requests `style.css` in Figure 
 [TODO: Figure 2]
 *Figure 2: server HTTP/1.1  response for `script.js` and `style.css`*
 
-In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. In this case, the headers and content for `style.css` are simply appended after the JavaScript file. The receiver uses the **Content-Length** header for each response to know where one ends and the other starts (in our simplified example, `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
+In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. The headers and content for `style.css` are simply appended after the JavaScript (JS) file. The receiver uses the **Content-Length** header for each response to know where one ends and the other starts (in our simplified example, `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
 
-All of that seems sensible enough. But let's consider what happens if we would like to send the JavaScript and CSS **at the same time**? (we will discuss [later in this blogpost](TODO scheduling) whether that's a good idea in practice or not). 
+All of that seems sensible enough in this simple example with two small files. However, let's imagine a scenario in which the JS file is much larger than CSS (say 1MB instead of 1KB). In this case, the CSS would have to wait before the entire JS file was downloaded, even though it is much smaller and thus could be parsed/used earlier, which can be better for Web performance. You can see this is an instance of the Head-of-Line blocking problem! 
 
+Now you might think: that's easy to solve! Just have the browser request the CSS file before the JS file! However, the browser has no way of knowing up-front which of the two will end up being the larger file at request time. 
+
+The "real" solution to this problem would be to employ **multiplexing**. If we can cut up each file into smaller pieces (instead of sending them as one big blob), we can "interleave" those chunks on the wire (send 1 chunk for the JS, 1 for the CSS, then 1 for the JS again, etc. until the files are downloaded). With this approach, the smaller CSS file will be downloaded much earlier, while only delaying the larger JS file by a bit. This is the scenario shown in Figure 3:
+
+[TODO: Figure 3]
+*Figure 3: server HTTP/1.1 multiplexing for `script.js` and `style.css`*
+ 
 
 
 
