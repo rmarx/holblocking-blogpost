@@ -6,7 +6,7 @@ As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols 
 
 [h3WithCaddy]: https://ma.ttias.be/how-run-http-3-with-caddy-2/
 
-HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the promised removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/2 but also HTTP/3 and QUIC. 
+HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the promised removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2. 
 
 [quicIntro]: https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/
 
@@ -46,7 +46,7 @@ All of that seems sensible enough in this simple example with two small files. H
 
 > 11111111111111111111111111111111111111122
 
-You can see this is an instance of the Head-of-Line blocking problem! Now you might think: that's easy to solve! Just have the browser request the CSS file before the JS file! However, the browser has no way of knowing up-front which of the two will end up being the larger file at request time. 
+You can see this is an instance of the Head-of-Line blocking problem! Now you might think: that's easy to solve! Just have the browser request the CSS file before the JS file! Crucially however, the browser has **no way of knowing up-front which of the two will end up being the larger file at request time**, as there is no way to for instance indicate in the HTML how large a file is (this would be lovely, HTML working group: `<img src="thisisfine.jpg" size="15000" />`).  
 
 The "real" solution to this problem would be to employ **multiplexing**. If we can cut up each file into smaller pieces (instead of sending them as one big blob), we can "interleave" those chunks on the wire (send a chunk for the JS, one for the CSS, then another for the JS again, etc. until the files are downloaded). With this approach, the smaller CSS file will be downloaded (and usable) much earlier, while only delaying the larger JS file by a bit. Visualized with numbers we would get:
 
@@ -72,7 +72,7 @@ Again, you could say there's an easy solution: have the browser look for the `HT
 
 This all is a fundamental limitation of the way the HTTP/1.1 protocol was designed. It means that, if you have a single HTTP/1.1 connection, resource responses always have to be delivered **in-full** before you can switch to sending a new resource. This can lead to severe HOL blocking issues if earlier resources are slow to create (for example a dynamically generated `index.html` that is filled from database queries) or, as above, if earlier resources are simply quite large.
 
-This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6 nowadays) for each page load over HTTP/1.1. That way, requests could be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... That's where the practice of "sharding" your resources over multiple domains and Content Delivery Networks (CDNs) comes from: as each domain gets 6 connections, browsers will open up to 30-ish TCP connections for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server) and takes some time (especially for an HTTPS connection). 
+This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6 nowadays) for each page load over HTTP/1.1. That way, requests could be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... That's where the practice of "sharding" your resources over multiple domains and Content Delivery Networks (CDNs) comes from: as each sharded domain gets 6 connections, browsers will open up to 30-ish TCP connections in total for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server) and takes some time (especially for an HTTPS connection). 
 
 [parallelConnections]: http://www.stevesouders.com/blog/2008/03/20/roundup-on-parallel-connections/
 
@@ -84,20 +84,40 @@ Before diving into HTTP/2 though, let's look at a related and often misunderstoo
 
 *Note: this section is not needed to understand the core of this blogpost, and mainly gives more technical background. Skip to [the HTTP/2 section](#sec_http2) to continue with the main story.*
 
-I've seen many posts and even books where people claim that HTTP/1.1 pipelining solves the HOL blocking issue. I've even seen some people claim that pipelining is the same as the multiplexing approach discussed above. Both statements are [false](https://theofficeanalytics.files.wordpress.com/2017/11/dwight.jpeg?w=1200). 
+I've seen many posts and even books where people claim that HTTP/1.1 pipelining solves the HOL blocking issue. I've even seen some people saying that pipelining is the same as the multiplexing approach discussed above. Both statements are [false](https://theofficeanalytics.files.wordpress.com/2017/11/dwight.jpeg?w=1200). 
 
+I find it easiest to explain pipelining with an illustration like the one in Figure 4:
 
+[TODO: Figure 4]
+*Figure 4: HTTP/1.1 pipelining*
 
+Without pipelining (left side of Figure 4), the browser has to wait to send the second resource request until the response for the first request has been completely received (again using Content-Length). This adds one Round-Trip-Time (RTT) of delay for each request, which is bad for Web performance.  
 
+With pipelining then (middle of Figure 4), the browser does not have to wait for any response data and can now send the requests back-to-back. This way we save some RTTs during the connection, making the loading process faster. *As a side-note, look back at Figure 2: you see that pipelining is actually used there as well, as the server bundles data from the `script.js` and `style.css` responses in TCP packet 2. This is of course only possible if the server received both requests around the same time.*
 
-- pipelining changes sending requests, but not responses, so no solution
-- note that Figure 2 is actually showing pipelined requests. Otherwise, data for `script.js` and `style.css` couldn't share packet 2. 
+Crucially however, this pipelining only applies to the **requests** from the browser. As the [HTTP/1.1 specification][h1spec] says:
+
+> A server MUST send its responses to those [pipelined] requests in the same order that the requests were received.
+
+As such, we see that actual multiplexing of response chunks (illustrated on the right side of Figure 4) is still not possible with HTTP/1.1 pipelining. Put differently: **pipelining solves HOL blocking for requests, but not for responses**. Sadly, it's arguably the response HOL blocking that causes the most issues for Web performance. 
+
+To make matters worse, most browsers actually do not use HTTP/1.1 pipelining in practice because it can make HOL blocking more unpredictable in the setup with multiple parallel TCP connections. To understand this, let's imagine a setup where three files A (large), B (small) and C (small) are being requested from the server over two TCP connections. A and B are each requested on a different connection. Now, on which connection should the browser pipeline the request for C? As we said before, it doesn't know up-front whether A or B will turn out to be the largest/slowest resource. 
+
+If it guesses correctly (B), it can download both B and C in the time it takes to transfer A, resulting in a nice speedup. However, if the guess is wrong (A), the connection for B will be idle for a long time, while C is HOL blocked behind A. This is because HTTP/1.1 also does not provide a way to "abort" a request once it's been sent (something which HTTP/2 and HTTP/3 do allow). The browser can thus not simply request C over B's connection once it becomes clear that is going to be the faster one, as it would end up requesting C twice. 
+
+To get around all this, modern browsers do not employ pipelining and will even actively delay requests of certain discovered resources (for example images) for a little while to see if more important files (say JS and CSS) are found, to make sure the high priority resources are not HOL blocked. 
+
+With all that, we're now ready to dig into HTTP/2 proper. 
+
+**TODO: add pipelining-in-browsers refs (dig through my papers for these)**
 
 <a name="sec_http2"></a>
 ## HOL blocking in HTTP/2 over TCP
 
 - H2 introduces framing, so yay, multiplexing!
 - However, still on 1 TCP stream, so vulnerable to packet loss and re-ordering
+
+- mention prioritization
 
 - However: much less of a problem in practice: low % is packet loss + bursty (important later)
 
