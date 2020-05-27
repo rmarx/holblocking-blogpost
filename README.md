@@ -114,6 +114,44 @@ With all that, we're now ready to dig into HTTP/2 proper.
 <a name="sec_http2"></a>
 ## HOL blocking in HTTP/2 over TCP
 
+So, let's recap. We now know that HTTP/1.1 has a HOL blocking problem where a large or slow response can end up delaying other and smaller responses behind it. This is mainly because the protocol is purely textual in nature and doesn't use delimiters between resource chunks. As a workaround, browsers open many parallel TCP connections, which is not efficient and doesn't scale.
+
+As such, the goal for HTTP/2 was quite clear: make it so that we can **move back to a single TCP connection by solving the HOL blocking problem**. Stated differently: we want to enable proper multiplexing of resource chunks. This wasn't possible in HTTP/1.1 because there was no way to discern to which resource a chunk belonged, or where it ended and another began. HTTP/2 solves this quite elegantly by prepending small control messages, called **frames**, before the resource chunks. This can be seen in Figure 5:
+
+[TODO: Figure 5]
+*Figure 5: server HTTP/1.1 vs HTTP/2 response for `script.js`*
+
+Unlike HTTP/1.1, HTTP/2 puts a so-called DATA frame in front of each chunk. These DATA frames mainly indicate two critical pieces of metadata: which resource the following chunk belongs to (each resource "stream" is assigned a unique number, the **stream id**) and how large this chunk is. The protocol has many other frame types as well, of which Figure 5 also shows the HEADERS frame. This again uses a stream id to indicate which response these headers belong to (so that headers can even be split up from their actual response data).
+
+Using these frames, it follows that HTTP/2 indeed allows proper multiplexing of several resources on one connection, see Figure 6:
+
+[TODO: Figure 6]
+*Figure 6: multiplexed server HTTP/2 responses for `script.js` and `style.css`*
+
+Unlike our example for Figure 3, the browser can now deal with this situation perfectly. It first processes the HEADERS frame for `script.js` (which also has a length built-in) and then the DATA frame for the first JS chunk. Because the DATA frame includes length of the chunk and this is perfectly contained in TCP packet 1, it knows that it needs to look for a completely new frame starting in TCP packet 2, where it indeed finds the HEADERS for `style.css`. The next DATA frame has a different stream id (2) than the first DATA frame (1), so the browser knows this belongs to a different resource and can process it independently. The same happens for TCP packet 3, where the DATA frame stream ids are used to "de-multiplex" the response chunks to their correct resource "streams". 
+
+We can see that, by "framing" individual messages, HTTP/2 is much more flexible than HTTP/1.1 and allows for many resources to be sent on a single TCP connection at once. We can thus say: HTTP/2 solves HTTP/1.1's HOL blocking problem, our work here is done, let's go home. 
+
+Well, not so fast there bucko. [We've solved HTTP/1.1 HOL blocking, yes, but what about TCP HOL blocking](https://4.bp.blogspot.com/-n4LJF-HJfS4/VuhfpUkYOxI/AAAAAAAAPTQ/H0I9ZU-lJGMY0dURTJZW-DwE_WenWooqQ/s1600/hobbit%2Bsecond.gif)? 
+
+- protocols have different perspectives. see Figure 7. 
+
+[TODO: Figure 7]
+*Figure 7: bytestream perspectives of HTTP/2 vs TCP*
+
+HTTP/2 doesn't know about JS or CSS, just the stream ids. Similarly, TCP doesn't know about these streams: it just sees data coming from above that it needs to send in packets. 
+- As such, there is a mismatch: TCP doesn't know about different streams. Look at the byte counts: they go up over time. 
+- Seems like unnecessary detail, but is important when we remember that TCP packets can be "lost" in the network and then need to be retransmitted. 
+
+- what happens if packet 2 is lost but packet 3 is not...
+- Maybe even clearer if packet 1 is lost: packet 2 and 3 need to wait, despite being imminently usable
+
+
+
+
+- single connection
+- binary + framing
+
 - H2 introduces framing, so yay, multiplexing!
 - However, still on 1 TCP stream, so vulnerable to packet loss and re-ordering
 
