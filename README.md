@@ -1,4 +1,4 @@
-# Does HTTP/3 really fix Head-of-Line blocking?
+# Does HTTP/3 really fix Head-of-Line blocking? Perhaps
 
 *In this blogpost, we look at the different variations of the Head-of-Line blocking problem from HTTP/1.1 over HTTP/2 to the new HTTP/3. We dive deep into the basic building blocks of the protocols, but I use lots of images and examples to hopefully keep things tangible, even for novices. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials.*
 
@@ -33,7 +33,7 @@ HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be
 
 In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is really straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content, that's it. Headers + content are then passed down to the underlying TCP (orange) for actual transport to the receiver. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
 
-*Note: in reality, when using HTTPS, there is another layer in between HTTP and TCP for security with the TLS protocol. However, we omit that in our discussion here for clarity. If you want to know more about how TLS impacts things, see the [bonus section at the end of this post](#sec_tls).* 
+*Note: in reality, when using HTTPS, there is another layer in between HTTP and TCP for security with the TLS protocol. However, we omit that in our discussion here for clarity. I did include a [bonus section at the end of this post](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it.* 
 
 Now let's see what happens when the browser also requests `style.css` in Figure 2:
 
@@ -78,38 +78,7 @@ This is why browsers [started opening multiple parallel TCP connections][paralle
 
 As this problem cannot be solved with HTTP/1.1 and the patchwork solution of parallel TCP connections didn't scale too well over time, it was clear a totally new approach was needed, which is what became HTTP/2. 
 
-### Intermezzo: HTTP/1.1 pipelining
-
-Before diving into HTTP/2 though, let's look at a related and often misunderstood HTTP/1.1 feature: pipelining. 
-
-*Note: this section is not needed to understand the core of this blogpost, and mainly gives more technical background. Skip to [the HTTP/2 section](#sec_http2) to continue with the main story.*
-
-I've seen many posts and even books where people claim that HTTP/1.1 pipelining solves the HOL blocking issue. I've even seen some people saying that pipelining is the same as the multiplexing approach discussed above. Both statements are [false](https://theofficeanalytics.files.wordpress.com/2017/11/dwight.jpeg?w=1200). 
-
-I find it easiest to explain pipelining with an illustration like the one in Figure 4:
-
-[TODO: Figure 4]
-*Figure 4: HTTP/1.1 pipelining*
-
-Without pipelining (left side of Figure 4), the browser has to wait to send the second resource request until the response for the first request has been completely received (again using Content-Length). This adds one Round-Trip-Time (RTT) of delay for each request, which is bad for Web performance.  
-
-With pipelining then (middle of Figure 4), the browser does not have to wait for any response data and can now send the requests back-to-back. This way we save some RTTs during the connection, making the loading process faster. *As a side-note, look back at Figure 2: you see that pipelining is actually used there as well, as the server bundles data from the `script.js` and `style.css` responses in TCP packet 2. This is of course only possible if the server received both requests around the same time.*
-
-Crucially however, this pipelining only applies to the **requests** from the browser. As the [HTTP/1.1 specification][h1spec] says:
-
-> A server MUST send its responses to those [pipelined] requests in the same order that the requests were received.
-
-As such, we see that actual multiplexing of response chunks (illustrated on the right side of Figure 4) is still not possible with HTTP/1.1 pipelining. Put differently: **pipelining solves HOL blocking for requests, but not for responses**. Sadly, it's arguably the response HOL blocking that causes the most issues for Web performance. 
-
-To make matters worse, most browsers actually do not use HTTP/1.1 pipelining in practice because it can make HOL blocking more unpredictable in the setup with multiple parallel TCP connections. To understand this, let's imagine a setup where three files A (large), B (small) and C (small) are being requested from the server over two TCP connections. A and B are each requested on a different connection. Now, on which connection should the browser pipeline the request for C? As we said before, it doesn't know up-front whether A or B will turn out to be the largest/slowest resource. 
-
-If it guesses correctly (B), it can download both B and C in the time it takes to transfer A, resulting in a nice speedup. However, if the guess is wrong (A), the connection for B will be idle for a long time, while C is HOL blocked behind A. This is because HTTP/1.1 also does not provide a way to "abort" a request once it's been sent (something which HTTP/2 and HTTP/3 do allow). The browser can thus not simply request C over B's connection once it becomes clear that is going to be the faster one, as it would end up requesting C twice. 
-
-To get around all this, modern browsers do not employ pipelining and will even actively delay requests of certain discovered resources (for example images) for a little while to see if more important files (say JS and CSS) are found, to make sure the high priority resources are not HOL blocked. 
-
-With all that, we're now ready to dig into HTTP/2 proper. 
-
-**TODO: add pipelining-in-browsers refs (dig through my papers for these)**
+*Note: the old guard reading this might wonder about HTTP/1.1 pipelining. I decided not to discuss that here to keep the overall story flowing, but people interested in even more technical depth can read the [bonus section at the end of this post](#sec_pipelining).
 
 <a name="sec_http2"></a>
 ## HOL blocking in HTTP/2 over TCP
@@ -183,9 +152,49 @@ HTTP/2 doesn't know about JS or CSS, just the stream ids. Similarly, TCP doesn't
 - In practice: the jury is still out. 
 - Either way: it's not much of an issue in practice, especially on fast networks
 
+<a name="sec_pipelining"></a>
+## Bonus: HTTP/1.1 pipelining
+
+HTTP/1.1 includes a feature called "pipelining" which is in my opinion often misunderstood. I've seen many posts and even books where people claim that HTTP/1.1 pipelining solves the HOL blocking issue. I've even seen some people saying that pipelining is the same as proper multiplexing. Both statements are [false](https://theofficeanalytics.files.wordpress.com/2017/11/dwight.jpeg?w=1200). 
+
+I find it easiest to explain HTTP/1.1 pipelining with an illustration like the one in Bonus Figure 1:
+
+[TODO: Bonus Figure 1]
+*Bonus Figure 1: HTTP/1.1 pipelining*
+
+Without pipelining (left side of Bonus Figure 1), the browser has to wait to send the second resource request until the response for the first request has been completely received (again using Content-Length). This adds one Round-Trip-Time (RTT) of delay for each request, which is bad for Web performance.  
+
+With pipelining then (middle of Bonus Figure 1), the browser does not have to wait for any response data and can now send the requests back-to-back. This way we save some RTTs during the connection, making the loading process faster. *As a side-note, look back at Figure 2: you see that pipelining is actually used there as well, as the server bundles data from the `script.js` and `style.css` responses in TCP packet 2. This is of course only possible if the server received both requests around the same time.*
+
+Crucially however, this pipelining only applies to the **requests** from the browser. As the [HTTP/1.1 specification][h1spec] says:
+
+> A server MUST send its responses to those [pipelined] requests in the same order that the requests were received.
+
+As such, we see that actual multiplexing of response chunks (illustrated on the right side of Bonus Figure 1) is still not possible with HTTP/1.1 pipelining. Put differently: **pipelining solves HOL blocking for requests, but not for responses**. Sadly, it's arguably the response HOL blocking that causes the most issues for Web performance. 
+
+To make matters worse, most browsers actually do not use HTTP/1.1 pipelining in practice because it can make HOL blocking more unpredictable in the setup with multiple parallel TCP connections. To understand this, let's imagine a setup where three files A (large), B (small) and C (small) are being requested from the server over two TCP connections. A and B are each requested on a different connection. Now, on which connection should the browser pipeline the request for C? As we said before, it doesn't know up-front whether A or B will turn out to be the largest/slowest resource. 
+
+If it guesses correctly (B), it can download both B and C in the time it takes to transfer A, resulting in a nice speedup. However, if the guess is wrong (A), the connection for B will be idle for a long time, while C is HOL blocked behind A. This is because HTTP/1.1 also does not provide a way to "abort" a request once it's been sent (something which HTTP/2 and HTTP/3 do allow). The browser can thus not simply request C over B's connection once it becomes clear that is going to be the faster one, as it would end up requesting C twice. 
+
+To get around all this, modern browsers do not employ pipelining and will even actively delay requests of certain discovered resources (for example images) for a little while to see if more important files (say JS and CSS) are found, to make sure the high priority resources are not HOL blocked. 
+
+It is clear that the failure of HTTP/1.1 pipelining was another motivation for HTTP/2's radically different approach. Yet, as HTTP/2's prioritization system to steer multiplexing often fails to perform in practice, some browsers have even taken to delaying HTTP/2 resource requests as well to get optimal performance. 
+
+**TODO: add pipelining-in-browsers + prioritization-delaying-in-chrome refs (dig through my papers for these)**
+
 <a name="sec_tls"></a>
 ## Bonus: TLS HOL blocking
 
+- TLS encrypts in blocks of up to 16KB for efficiency
+- if the last X of those blocks are lost, we cannot decrypt the first N - X blocks
+- so there is a kind of TLS-specific HOL blocking happening if the final chunks of a TLS record are lost
+
+- this is one of the reasons that QUIC encrypts one packet at a time
+- This is less efficient (and one of the main reasons QUIC requires more CPU than TCP), but prevents QUIC-level HOL blocking even in these edge cases.
+
+
+[tlsSizing]: https://www.igvita.com/2013/10/24/optimizing-tls-record-size-and-buffering-latency/
+[tlsSizing2]: https://blog.cloudflare.com/optimizing-tls-over-tcp-to-reduce-latency/
 
 
 ## References
