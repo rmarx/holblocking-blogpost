@@ -85,23 +85,59 @@ As this problem cannot be solved with HTTP/1.1 and the patchwork solution of par
 
 So, let's recap. We now know that HTTP/1.1 has a HOL blocking problem where a large or slow response can end up delaying other and smaller responses behind it. This is mainly because the protocol is purely textual in nature and doesn't use delimiters between resource chunks. As a workaround, browsers open many parallel TCP connections, which is not efficient and doesn't scale.
 
-As such, the goal for HTTP/2 was quite clear: make it so that we can **move back to a single TCP connection by solving the HOL blocking problem**. Stated differently: we want to enable proper multiplexing of resource chunks. This wasn't possible in HTTP/1.1 because there was no way to discern to which resource a chunk belonged, or where it ended and another began. HTTP/2 solves this quite elegantly by prepending small control messages, called **frames**, before the resource chunks. This can be seen in Figure 5:
+As such, the goal for HTTP/2 was quite clear: make it so that we can **move back to a single TCP connection by solving the HOL blocking problem**. Stated differently: we want to enable proper multiplexing of resource chunks. This wasn't possible in HTTP/1.1 because there was no way to discern to which resource a chunk belonged, or where it ended and another began. HTTP/2 solves this quite elegantly by prepending small control messages, called **frames**, before the resource chunks. This can be seen in Figure 4:
+
+[TODO: Figure 4]
+*Figure 4: server HTTP/1.1 vs HTTP/2 response for `script.js`*
+
+Unlike HTTP/1.1, HTTP/2 puts a so-called DATA frame in front of each chunk. These DATA frames mainly indicate two critical pieces of metadata. First: which resource the following chunk belongs to (each resource "stream" is assigned a unique number, the **stream id**). Second: how large the following chunk is. The protocol has many other frame types as well, of which Figure 5 also shows the HEADERS frame. This again uses a stream id to indicate which response these headers belong to (so that headers can even be split up from their actual response data).
+
+Using these frames, it follows that HTTP/2 indeed allows proper multiplexing of several resources on one connection, see Figure 5:
 
 [TODO: Figure 5]
-*Figure 5: server HTTP/1.1 vs HTTP/2 response for `script.js`*
-
-Unlike HTTP/1.1, HTTP/2 puts a so-called DATA frame in front of each chunk. These DATA frames mainly indicate two critical pieces of metadata: which resource the following chunk belongs to (each resource "stream" is assigned a unique number, the **stream id**) and how large this chunk is. The protocol has many other frame types as well, of which Figure 5 also shows the HEADERS frame. This again uses a stream id to indicate which response these headers belong to (so that headers can even be split up from their actual response data).
-
-Using these frames, it follows that HTTP/2 indeed allows proper multiplexing of several resources on one connection, see Figure 6:
-
-[TODO: Figure 6]
-*Figure 6: multiplexed server HTTP/2 responses for `script.js` and `style.css`*
+*Figure 5: multiplexed server HTTP/2 responses for `script.js` and `style.css`*
 
 Unlike our example for Figure 3, the browser can now deal with this situation perfectly. It first processes the HEADERS frame for `script.js` (which also has a length built-in) and then the DATA frame for the first JS chunk. Because the DATA frame includes length of the chunk and this is perfectly contained in TCP packet 1, it knows that it needs to look for a completely new frame starting in TCP packet 2, where it indeed finds the HEADERS for `style.css`. The next DATA frame has a different stream id (2) than the first DATA frame (1), so the browser knows this belongs to a different resource and can process it independently. The same happens for TCP packet 3, where the DATA frame stream ids are used to "de-multiplex" the response chunks to their correct resource "streams". 
 
-We can see that, by "framing" individual messages, HTTP/2 is much more flexible than HTTP/1.1 and allows for many resources to be sent on a single TCP connection at once. We can thus say: HTTP/2 solves HTTP/1.1's HOL blocking problem, our work here is done, let's go home. 
+We can see that, by "framing" individual messages, HTTP/2 is much more flexible than HTTP/1.1. It allows for many resources to be sent multiplexed on a single TCP connection by interleaving their chunks. It also solves HOL blocking in the case of a slow first resource: instead of waiting for the database-backed index.html to be generated, the server can simply start sending data for other resources in the mean time while it waits for index.html. 
 
-Well, not so fast there bucko. [We've solved HTTP/1.1 HOL blocking, yes, but what about TCP HOL blocking](https://4.bp.blogspot.com/-n4LJF-HJfS4/VuhfpUkYOxI/AAAAAAAAPTQ/H0I9ZU-lJGMY0dURTJZW-DwE_WenWooqQ/s1600/hobbit%2Bsecond.gif)? 
+*Note: HTTP/2's multiplexing does not actually mean that the resources are sent **at the same time** or truly in parallel. The available bandwidth of the singular connection is simply distributed across/shared among the different files, but chunsk are still sent sequentially. This is fundamentally different from HTTP/1.1's workaround of opening multiple parallel connections. With that method, you can actually get much more bandwidth, as each TCP connection utilizes its own "congestion control" logic. The details of this would again take us too far in this post. The main conclusion is that, perhaps unexpectedly, using a single HTTP/2 connection can definitely be faster than 6 parallel HTTP/1.1 connections, but also that it [sometimes pays off to have multiple parallel HTTP/2 connections][h2Sharding] as well. As with all things Web performance: it depends.*
+
+[h2sharding]: https://twitter.com/zachleat/status/1055219667894259712?s=20
+
+An important consequence of HTTP/2's approach is that we suddenly also need a way for the browser to communicate to the server how it would like the single connection's bandwidth to be distributed across resources. Put differently: how resource chunks should be "scheduled" or interleaved. If we again visualize this with 1's and 2's, we see that for HTTP/1.1, the only option was 11112222 (let's call that sequential). HTTP/2 however has a lot more freedom:
+
+> - Fair multiplexing (for example two progressive JPEGs): 12121212
+> - Weighted multiplexing (2 is twice as important as 1): 221221221
+> - Reversed sequential scheduling (for example 2 is a key Server Pushed resources): 22221111  
+> - Partial scheduling (stream 1 is aborted and not sent in full): 112222
+
+Which of these is used exactly is driven by the so-called "prioritization" system in HTTP/2 and the chosen approach can have a big impact on Web performance. That is however a very complex topic by itself and you don't really need to understand it for the rest of this blogpost, so I've left it out here (though I do have [an extensive lecture on this on YouTube][prioritiesVideo]).
+
+[prioritiesVideo]: https://www.youtube.com/watch?v=nH4iRpFnf1c
+
+I think you'll agree that, with HTTP/2's frames and its prioritization setup, it indeed solves HTTP/1.1's HOL blocking problem. This means my work here is done and we can all go home. Right? Well, not so fast there bucko. [We've solved HTTP/1.1 HOL blocking, yes, but what about TCP HOL blocking](https://4.bp.blogspot.com/-n4LJF-HJfS4/VuhfpUkYOxI/AAAAAAAAPTQ/H0I9ZU-lJGMY0dURTJZW-DwE_WenWooqQ/s1600/hobbit%2Bsecond.gif)? 
+
+### TCP HOL blocking
+
+As it turns out, HTTP/2 only solved HOL blocking at the HTTP level, what we might call "Application Layer" HOL blocking. There are however other layers below that to consider in the typical networking model. You can see this clearly in Figure 6:
+
+[TODO: Figure 6]
+*Figure 6: the top few protocol layers in the typical networking model.*
+
+HTTP is at the top, but is supported first by TLS at the Security Layer (see the [Bonus section](#sec_tls)), which in turn is carried by TCP at the Transport layer. Each of these protocols wrap the data from the layer above it with some metadata (for example the TCP packet header is prepended to our HTTP data, while that then gets put inside an IP packet etc.). This allows for a relatively neat separation between the protocols. This in turn is good for their re-usability: a Transport Layer protocol like TCP doesn't have to care about what type of data it is transporting (it could be HTTP, it could be FTP, it could be SSH, who knows), and IP works fine for both TCP and UDP. 
+
+This does however have important consequences if we want to multiplex multiple HTTP/2 resources onto one TCP connection. Consider Figure 7:
+
+[TODO: Figure 7]
+*Figure 7: difference in perspective between HTTP/2 and TCP*
+
+While both we and the browser understand we are fetching JavaScript and CSS files, even HTTP/2 doesn't (need to) know that. All it knows is that it is working with chunks from different resource stream ids. However, **TCP doesn't even know that it's transporting HTTP!** All TCP knows is that it has been given a series of bytes that it has to transport from one computer to another, for which it uses packets of a certain maximum size. If there is too much data for just one packet, it will create more packets. 
+
+Put differently, there is a mismatch in perspective between the two Layers: HTTP/2 sees multiple, independent resource bytestreams, but TCP sees just a single, opaque stream. 
+
+
+
 
 - protocols have different perspectives. see Figure 7. 
 
