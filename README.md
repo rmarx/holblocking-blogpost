@@ -132,20 +132,12 @@ This does however have important consequences if we want to multiplex multiple H
 [TODO: Figure 7]
 *Figure 7: difference in perspective between HTTP/2 and TCP*
 
-While both we and the browser understand we are fetching JavaScript and CSS files, even HTTP/2 doesn't (need to) know that. All it knows is that it is working with chunks from different resource stream ids. However, **TCP doesn't even know that it's transporting HTTP!** All TCP knows is that it has been given a series of bytes that it has to transport from one computer to another, for which it uses packets of a certain maximum size. If there is too much data for just one packet, it will create more packets. 
+While both we and the browser understand we are fetching JavaScript and CSS files, even HTTP/2 doesn't (need to) know that. All it knows is that it is working with chunks from different resource stream ids. However, **TCP doesn't even know that it's transporting HTTP!** All TCP knows is that it has been given a series of bytes that it has to transport from one computer to another, for which it uses packets of a certain maximum size. Each packet just tracks which part of the data (byte range) it carries so the original data can be reconstructed in the correct order.  
 
-Put differently, there is a mismatch in perspective between the two Layers: HTTP/2 sees multiple, independent resource bytestreams, but TCP sees just a single, opaque stream. 
-
-
+Put differently, there is a mismatch in perspective between the two Layers: HTTP/2 sees multiple, independent resource bytestreams, but TCP sees just a single, opaque bytestream. An example is Figure 7's TCP packet 3: TCP just knows it is carrying byte 750 to byte 1599 of whatever it is transporting. HTTP/2 on the other hand knows there are actually two chunks of two separate resources. *(Note: In reality, each HTTP/2 frame (like DATA and HEADERS) is also a couple of bytes in size. For simplicity, I haven't counted that extra overhead or the HEADERS frames here to make the numbers more intuitive.)*
 
 
-- protocols have different perspectives. see Figure 7. 
 
-[TODO: Figure 7]
-*Figure 7: bytestream perspectives of HTTP/2 vs TCP*
-
-HTTP/2 doesn't know about JS or CSS, just the stream ids. Similarly, TCP doesn't know about these streams: it just sees data coming from above that it needs to send in packets. 
-- As such, there is a mismatch: TCP doesn't know about different streams. Look at the byte counts: they go up over time. 
 - Seems like unnecessary detail, but is important when we remember that TCP packets can be "lost" in the network and then need to be retransmitted. 
 
 - what happens if packet 2 is lost but packet 3 is not...
@@ -160,11 +152,8 @@ HTTP/2 doesn't know about JS or CSS, just the stream ids. Similarly, TCP doesn't
 - H2 introduces framing, so yay, multiplexing!
 - However, still on 1 TCP stream, so vulnerable to packet loss and re-ordering
 
-- mention prioritization
-
 - However: much less of a problem in practice: low % is packet loss + bursty (important later)
 
-- make a point of performance: multiple parallel connecttions is faster than a single connection? Complex, has to do with Congestion Control etc. something for another blogpost. In general: it depends, doesn't mean H1 or H2 (or H3) is always slower/faster. 
 
 <a name="sec_http3"></a>
 ## HOL blocking in HTTP/3 over QUIC
