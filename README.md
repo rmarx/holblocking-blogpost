@@ -1,7 +1,5 @@
 # Does HTTP/3 really fix Head-of-Line blocking? Perhaps
 
-*In this blogpost, we look at the different variations of the Head-of-Line blocking problem from HTTP/1.1 over HTTP/2 to the new HTTP/3. We dive deep into the basic building blocks of the protocols, but I use lots of images and examples to hopefully keep things tangible, even for novices. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials.*
-
 As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols are finally approaching official standardization. Preview versions are now [available for testing in servers and browsers alike][h3WithCaddy]. 
 
 [h3WithCaddy]: https://ma.ttias.be/how-run-http-3-with-caddy-2/
@@ -10,7 +8,7 @@ HTTP/3 is promising major performance improvements compared to HTTP/2, mainly be
 
 [quicIntro]: https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/
 
-I'll first introduce the problem and then track different forms of it throughout HTTP's history. Spoiler: much like the [cake][cake], HOL blocking removal in HTTP/3 is probably a lie. 
+I'll first introduce the problem and then track different forms of it throughout HTTP's history. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials. Spoiler: much like the [cake][cake], HOL blocking removal in HTTP/3 is probably a lie. 
 
 [cake]: https://knowyourmeme.com/memes/the-cake-is-a-lie
 
@@ -125,7 +123,7 @@ As it turns out, HTTP/2 only solved HOL blocking at the HTTP level, what we migh
 [TODO: Figure 6]
 *Figure 6: the top few protocol layers in the typical networking model.*
 
-HTTP is at the top, but is supported first by TLS at the Security Layer (see the [Bonus section](#sec_tls)), which in turn is carried by TCP at the Transport layer. Each of these protocols wrap the data from the layer above it with some metadata (for example the TCP packet header is prepended to our HTTP data, while that then gets put inside an IP packet etc.). This allows for a relatively neat separation between the protocols. This in turn is good for their re-usability: a Transport Layer protocol like TCP doesn't have to care about what type of data it is transporting (it could be HTTP, it could be FTP, it could be SSH, who knows), and IP works fine for both TCP and UDP. 
+HTTP is at the top, but is supported first by TLS at the Security Layer (see the [Bonus TLS section](#sec_tls)), which in turn is carried by TCP at the Transport layer. Each of these protocols wrap the data from the layer above it with some metadata (for example the TCP packet header is prepended to our HTTP data, while that then gets put inside an IP packet etc.). This allows for a relatively neat separation between the protocols. This in turn is good for their re-usability: a Transport Layer protocol like TCP doesn't have to care about what type of data it is transporting (it could be HTTP, it could be FTP, it could be SSH, who knows), and IP works fine for both TCP and UDP. 
 
 This does however have important consequences if we want to multiplex multiple HTTP/2 resources onto one TCP connection. Consider Figure 7:
 
@@ -134,23 +132,21 @@ This does however have important consequences if we want to multiplex multiple H
 
 While both we and the browser understand we are fetching JavaScript and CSS files, even HTTP/2 doesn't (need to) know that. All it knows is that it is working with chunks from different resource stream ids. However, **TCP doesn't even know that it's transporting HTTP!** All TCP knows is that it has been given a series of bytes that it has to transport from one computer to another, for which it uses packets of a certain maximum size. Each packet just tracks which part of the data (byte range) it carries so the original data can be reconstructed in the correct order.  
 
-Put differently, there is a mismatch in perspective between the two Layers: HTTP/2 sees multiple, independent resource bytestreams, but TCP sees just a single, opaque bytestream. An example is Figure 7's TCP packet 3: TCP just knows it is carrying byte 750 to byte 1599 of whatever it is transporting. HTTP/2 on the other hand knows there are actually two chunks of two separate resources. *(Note: In reality, each HTTP/2 frame (like DATA and HEADERS) is also a couple of bytes in size. For simplicity, I haven't counted that extra overhead or the HEADERS frames here to make the numbers more intuitive.)*
+Put differently, there is a mismatch in perspective between the two Layers: HTTP/2 sees multiple, independent resource bytestreams, but TCP sees just a single, opaque bytestream. An example is Figure 7's TCP packet 3: TCP just knows it is carrying byte 750 to byte 1599 of whatever it is transporting. HTTP/2 on the other hand knows there are actually two chunks of two separate resources in packet 3. *(Note: In reality, each HTTP/2 frame (like DATA and HEADERS) is also a couple of bytes in size. For simplicity, I haven't counted that extra overhead or the HEADERS frames here to make the numbers more intuitive.)*
+
+All of this might seem like unnecessary details, until you realize that the Internet is a fundamentally unreliable network. Packets can and do get lost and delayed during transport from one endpoint to the other. This is exactly one of the reasons why TCP is so popular: it ensures reliability on top of the unreliable IP. It does this quite simply by **retransmitting copies of lost packets**. 
+
+We can now understand how that can lead to HOL blocking at the Transport Layer. Consider again Figure 7 and ask yourself: what should happen if TCP packet 2 is lost in the network, but somehow packet 1 and packet 3 do arrive? Remember that TCP doesn't know it's carrying HTTP/2, just that it needs to deliver data in-order. As such, it knows the contents of packet 1 are safe to use and passes those to the browser. However, it sees that there is a gap between the bytes in packet 1 and those in packet 3 (where packet 2 fits), and thus cannot yet pass packet 3 to the browser. TCP keeps packet 3 in its receive buffer until it receives the retransmitted copy of packet 2 (which takes at least 1 RTT), after which it can pass both to the browser in the correct order. Put differently: **the lost packet 2 is HOL blocking packet 3**!
+
+It might not be clear why this is a problem though, so let's dig deeper by looking at what is actually inside the TCP packets at the HTTP layer in Figure 7. We can see that TCP packet 2 carries only data for stream id 2 (the CSS file) and that packet 3 carries data for both streams 1 (the JS file) and 2. At the HTTP level, we know those two streams are independent and clearly delineated by the DATA frames. As such, we could in theory perfectly pass packet 3 to the browser without waiting for packet 2 to arrive. The browser would see a DATA frame for stream id 1 and would be able to directly use it. Only stream 2 would have to be put on hold, waiting for packet 2's retransmit. This would be more efficient than what we get from TCPs approach, which ends up blocking both stream 1 and 2. 
+
+Another example is the situation where packet 1 is lost, but 2 and 3 are received. TCP will again hold back both packets 2 and 3, waiting for 1. However, we can see that at the HTTP/2 level, the data for stream 2 (the CSS file) is present completely in packets 2 and 3 and doesn't have to wait for packet 1's retransmit. The browser could have perfectly parsed/processed/used the CSS file, but is stick waiting for the JS file's retransmit. 
+
+In conclusion, the fact that TCP does not know about HTTP/2's independent streams means that **TCP-Layer HOL blocking (due to lost or delayed packets) also ends up HOL blocking HTTP**. 
+
+Now, you might ask yourself: then what was the point? Why do HTTP/2 at all if we still have HOL blocking? Well, the main reason is that while packet loss does happen on networks, it is still relatively rare. Especially on high-speed, cabled networks, packet loss rates are on the order of 0.01%. Even on the worst cellular networks, you will rarely see rates higher than 2% in practice. 
 
 
-
-- Seems like unnecessary detail, but is important when we remember that TCP packets can be "lost" in the network and then need to be retransmitted. 
-
-- what happens if packet 2 is lost but packet 3 is not...
-- Maybe even clearer if packet 1 is lost: packet 2 and 3 need to wait, despite being imminently usable
-
-
-
-
-- single connection
-- binary + framing
-
-- H2 introduces framing, so yay, multiplexing!
-- However, still on 1 TCP stream, so vulnerable to packet loss and re-ordering
 
 - However: much less of a problem in practice: low % is packet loss + bursty (important later)
 
