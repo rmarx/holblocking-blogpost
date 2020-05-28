@@ -1,14 +1,14 @@
-# Does HTTP/3 really fix Head-of-Line blocking? Perhaps
+# Will HTTP/3 really be faster than HTTP/2? Perhaps
 
 As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols are finally approaching official standardization. Preview versions are now [available for testing in servers and browsers alike][h3WithCaddy]. 
 
 [h3WithCaddy]: https://ma.ttias.be/how-run-http-3-with-caddy-2/
 
-HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the promised removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2. 
+HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2, so it gives a fantastic insight in the reasons for protocol evolution as well.  
 
 [quicIntro]: https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/
 
-I'll first introduce the problem and then track different forms of it throughout HTTP's history. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials. Spoiler: much like the [cake][cake], HOL blocking removal in HTTP/3 is probably a lie. 
+I'll first introduce the problem and then track different forms of it throughout HTTP's history. To make this post accessible for novices, we will touch on and explain many other aspects of modern Web protocols as well (like prioritization and congestion control). The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials. Spoiler: much like the [cake][cake], HOL blocking removal in HTTP/3 is probably a lie and probably won't lead to much speedups in practice.  
 
 [cake]: https://knowyourmeme.com/memes/the-cake-is-a-lie
 
@@ -99,10 +99,6 @@ Unlike our example for Figure 3, the browser can now deal with this situation pe
 
 We can see that, by "framing" individual messages, HTTP/2 is much more flexible than HTTP/1.1. It allows for many resources to be sent multiplexed on a single TCP connection by interleaving their chunks. It also solves HOL blocking in the case of a slow first resource: instead of waiting for the database-backed index.html to be generated, the server can simply start sending data for other resources in the mean time while it waits for index.html. 
 
-*Note: HTTP/2's multiplexing does not actually mean that the resources are sent **at the same time** or truly in parallel. The available bandwidth of the singular connection is simply distributed across/shared among the different files, but chunsk are still sent sequentially. This is fundamentally different from HTTP/1.1's workaround of opening multiple parallel connections. With that method, you can actually get much more bandwidth, as each TCP connection utilizes its own "congestion control" logic. The details of this would again take us too far in this post. The main conclusion is that, perhaps unexpectedly, using a single HTTP/2 connection can definitely be faster than 6 parallel HTTP/1.1 connections, but also that it [sometimes pays off to have multiple parallel HTTP/2 connections][h2Sharding] as well. As with all things Web performance: it depends.*
-
-[h2sharding]: https://twitter.com/zachleat/status/1055219667894259712?s=20
-
 An important consequence of HTTP/2's approach is that we suddenly also need a way for the browser to communicate to the server how it would like the single connection's bandwidth to be distributed across resources. Put differently: how resource chunks should be "scheduled" or interleaved. If we again visualize this with 1's and 2's, we see that for HTTP/1.1, the only option was 11112222 (let's call that sequential). HTTP/2 however has a lot more freedom:
 
 > - Fair multiplexing (for example two progressive JPEGs): 12121212
@@ -144,11 +140,30 @@ Another example is the situation where packet 1 is lost, but 2 and 3 are receive
 
 In conclusion, the fact that TCP does not know about HTTP/2's independent streams means that **TCP-Layer HOL blocking (due to lost or delayed packets) also ends up HOL blocking HTTP**. 
 
-Now, you might ask yourself: then what was the point? Why do HTTP/2 at all if we still have HOL blocking? Well, the main reason is that while packet loss does happen on networks, it is still relatively rare. Especially on high-speed, cabled networks, packet loss rates are on the order of 0.01%. Even on the worst cellular networks, you will rarely see rates higher than 2% in practice. 
+Now, you might ask yourself: then what was the point? Why do HTTP/2 at all if we still have HOL blocking? Well, the main reason is that while packet loss does happen on networks, it is still relatively rare. Especially on high-speed, cabled networks, packet loss rates are on the order of 0.01%. Even on the worst cellular networks, you will rarely see rates higher than 2% in practice. This is combined with the fact that packet loss and also jitter (delay variations in the network), are often **bursty**. A packet loss rate of 2% does not mean that you will always have 2 packets out of every 100 being lost (for example packet nr 42 and nr 96). In practice, it would probably be more like 10 **consecutive** packets being lost in a total of 500 (say packet nr 255 to 265). This is because packet loss is often caused by temporarily overflowing memory buffers in routers in the network path, which start dropping packets they cannot store. Again though, the details aren't important here (but [available elsewhere if you'd like to know more][routerloss]). What is important is that: yes, TCP HOL blocking is real, but it has a much smaller impact on Web performance than HTTP/1.1 HOL blocking, which you are almost guaranteed to hit every time *and* which also suffers from TCP HOL blocking! 
 
+[routerloss]: https://ripe80.ripe.net/presentations/5-2020-05-12-buffers.pdf
 
+However, this is mainly true when comparing HTTP/2 on a single connection with HTTP/1.1 on a single connection. As we've seen before, that's not really how it works in practice, as HTTP/1.1 typically opens multiple connections. This allows HTTP/1.1 to somewhat mitigate not only the HTTP-level but also the TCP-level HOL blocking. As such, in some cases, HTTP/2 on a single connection has a hard time being faster than or even as fast as HTTP/1.1 on 6 connections. This is mainly due to TCP's **"congestion control"** mechanism. This is however yet another very deep topic we don't have time to explore in-depth here, so you'll have to take my word for it that the following conclusions are correct (if sometimes overly simplified!) ;) 
 
-- However: much less of a problem in practice: low % is packet loss + bursty (important later)
+The congestion controller's main job is to make sure the network isn't overloaded by too much data at the same time. If that happens, the router buffers start overflowing, and we have packet loss, as described above. So, what it typically does is start by sending just a little bit of data (usually about 14KB) to see if that makes it through. If that works, it doubles that every RTT until a packet loss event is observed (meaning the network is overloaded (a bit) and it needs to back down (a bit)). This is how a TCP connection "probes" for its available bandwidth. Crucially: **this mechanism works for each TCP connection independently**!
+
+Firstly, this means that HTTP/2's single connection initially only sends 14KB. However, HTTP/1.1's 6 connections each send 14KB in their first flight, which is about 84KB! This will compound over time, as each HTTP/1.1 connection doubles its data use each RTT. Secondly, a connection will only lower its sending rate if there is packet loss. For HTTP/2's single connection, even a single packet loss means it will slow down (in addition to causing TCP HOL blocking!). However, for HTTP/1.1, a single packet loss on just one of the connections will only slow down that one: the other 5 can just keep sending and growing as normal.
+
+This all makes one thing very clear: **HTTP/2's multiplexing is not the same as HTTP/1.1's downloading resources at the same time**(something which I also still see some people claiming). The available bandwidth of the singular HTTP/2 connection is simply distributed across/shared among the different files, but chunks are still sent sequentially. This is different from HTTP/1.1, where things are sent in a truly parallel fashion. 
+
+By now, you might be wondering: **how then can HTTP/2 ever be faster than HTTP/1.1**? That is a good question, one that I have been asking myself on and off for a long time as well. One obvious answer is in cases where you have -many- more than 6 files. This is how HTTP/2 was marketed back in the day: [by splitting an image into tiny squares and loading those over HTTP/1.1 vs HTTP/2][gophertiles]. This mainly shows off HTTP/2's HOL blocking removal. For normal/real websites however, things get a lot more nuanced quickly. It depends on the amount of resources, their size, the used prioritization/multiplexing scheme, the RTT to the server, how much loss there actually is and when it happens, how much other traffic is on the link at the same time, the used congestion controller logic, etc. One example where HTTP/1.1 can lose is on networks with limited available bandwidth: the 6 HTTP/1.1 connections each grow their send rate individually, causing them to overload the network quite quickly, after which they all have to back down and have to find their co-existent bandwidth limit through trial and error. The single HTTP/2 connection instead grows more slowly, but it is faster to recover after a packet loss event and finds its optimal bandwidth faster.  
+
+[gophertiles]: https://http2.golang.org/gophertiles
+
+All in all, in practice, we see that (perhaps unexpectedly), HTTP/2 as it is currently deployed in browsers and servers is typically as fast or slightly faster than HTTP/1.1 in most conditions. This is in my opinion partly because websites got better at optimizing for HTTP/2, and partly because browsers often still open multiple parallel HTTP/2 connections (either because sites still [shard their resources over different servers][h2sharding], or because of security-related side-effects), thus getting the best of both worlds.
+
+[h2sharding]: https://twitter.com/zachleat/status/1055219667894259712?s=20
+
+**TODO: link to Barry's H2 chapter in the web almanac**
+**TODO: link to jake archibald's blogpost on "credentialed vs non-credentialed" connections + Matt Hobbs' examples from WPT**
+
+However, there are also some cases (especially on slower networks with higher packet loss) where HTTP/1.1 on 6 connections will still outshine HTTP/2 on one connection, which is often due to the TCP-level HOL blocking problem. It is this fact that was a large motivator for the development of the new QUIC transport protocol as a replacement for TCP. 
 
 
 <a name="sec_http3"></a>
@@ -172,6 +187,10 @@ Now, you might ask yourself: then what was the point? Why do HTTP/2 at all if we
 - So... in theory: it's solved
 - In practice: the jury is still out. 
 - Either way: it's not much of an issue in practice, especially on fast networks
+
+- So... will HTTP/3 be faster? Probably, but it won't be (much) because of HOL blocking removal. What will it be due to you ask? 0-RTT connection establishment. However, that's for a future post (or read my paper or watch my youtube videos).
+
+- If you liked this, I'm working on a book: let me keep you up to date!
 
 <a name="sec_pipelining"></a>
 ## Bonus: HTTP/1.1 pipelining
