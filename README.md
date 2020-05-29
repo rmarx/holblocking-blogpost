@@ -26,7 +26,7 @@ As it turns out, that concept has been one of the hardest Web performance proble
 
 HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be text-based and readable on the wire. This is illustrated in Figure 1 below:
 
-[TODO: Figure 1]
+![server HTTP/1.1 response for script.js](https://github.com/rmarx/holblocking-blogpost/raw/master/images/1_H1_1file.png)
 *Figure 1: server HTTP/1.1 response for `script.js`*
 
 In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is really straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content, that's it. Headers + content are then passed down to the underlying TCP (orange) for actual transport to the receiver. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
@@ -35,7 +35,7 @@ In this case, the browser requested the simple `script.js` file (green) over HTT
 
 Now let's see what happens when the browser also requests `style.css` in Figure 2:
 
-[TODO: Figure 2]
+![server HTTP/1.1  response for script.js and style.css](https://github.com/rmarx/holblocking-blogpost/raw/master/images/2_H1_2files.png)
 *Figure 2: server HTTP/1.1  response for `script.js` and `style.css`*
 
 In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. The headers and content for `style.css` are simply appended after the JavaScript (JS) file. The receiver uses the **Content-Length** header for each response to know where one ends and the other starts (in our simplified example, let's pretend `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
@@ -52,7 +52,7 @@ The "real" solution to this problem would be to employ **multiplexing**. If we c
 
 Sadly however, this multiplexing is not possible in HTTP/1.1 due to some fundamental limitations with the protocol's assumptions. To understand this, we don't even need to keep looking at the large-vs-small resource scenario, as it already shows up in our example with the two smaller files. Consider Figure 3, where we interleave just 4 chunks for the two resources:
 
-[TODO: Figure 3]
+![server HTTP/1.1 multiplexing for script.js and style.css](https://github.com/rmarx/holblocking-blogpost/raw/master/images/3_H1_2files_multiplexed.png)
 *Figure 3: server HTTP/1.1 multiplexing for `script.js` and `style.css`*
  
 The main problem here is that HTTP/1.1 is a purely textual protocol that only appends headers to the front. It does nothing further to differentiate individual (chunks of) resources from one another. As such, in Figure 3, the browser starts parsing the headers for `script.js` and expects 1000 bytes of response body (the Content-Length). It however only receives 450 JS bytes (the first JS chunk) and then starts reading the headers for `style.css`. It ends up interpreting the CSS headers and the first CSS chunk as part of the JS, as the file contents and headers for both files are just plaintext. Making matters worse, it stops after reading 1000 bytes, ending up somewhere halfway through the second `script.js` chunk. At this point, it doesn't see valid new headers and has to drop the rest of TCP packet 3. The browser then passes this weird text blob to the JS parser, which fails because it's not valid JavaScript:
@@ -85,14 +85,14 @@ So, let's recap. We now know that HTTP/1.1 has a HOL blocking problem where a la
 
 As such, the goal for HTTP/2 was quite clear: make it so that we can **move back to a single TCP connection by solving the HOL blocking problem**. Stated differently: we want to enable proper multiplexing of resource chunks. This wasn't possible in HTTP/1.1 because there was no way to discern to which resource a chunk belonged, or where it ended and another began. HTTP/2 solves this quite elegantly by prepending small control messages, called **frames**, before the resource chunks. This can be seen in Figure 4:
 
-[TODO: Figure 4]
+![server HTTP/1.1 vs HTTP/2 response for script.js](https://github.com/rmarx/holblocking-blogpost/raw/master/images/4_H2_1file.png)
 *Figure 4: server HTTP/1.1 vs HTTP/2 response for `script.js`*
 
 Unlike HTTP/1.1, HTTP/2 puts a so-called DATA frame in front of each chunk. These DATA frames mainly indicate two critical pieces of metadata. First: which resource the following chunk belongs to (each resource "stream" is assigned a unique number, the **stream id**). Second: how large the following chunk is. The protocol has many other frame types as well, of which Figure 5 also shows the HEADERS frame. This again uses a stream id to indicate which response these headers belong to (so that headers can even be split up from their actual response data).
 
 Using these frames, it follows that HTTP/2 indeed allows proper multiplexing of several resources on one connection, see Figure 5:
 
-[TODO: Figure 5]
+![multiplexed server HTTP/2 responses for script.js and style.css](https://github.com/rmarx/holblocking-blogpost/raw/master/images/5_H2_2files_multiplexed.png)
 *Figure 5: multiplexed server HTTP/2 responses for `script.js` and `style.css`*
 
 Unlike our example for Figure 3, the browser can now deal with this situation perfectly. It first processes the HEADERS frame for `script.js` (which also has a length built-in) and then the DATA frame for the first JS chunk. Because the DATA frame includes length of the chunk and this is perfectly contained in TCP packet 1, it knows that it needs to look for a completely new frame starting in TCP packet 2, where it indeed finds the HEADERS for `style.css`. The next DATA frame has a different stream id (2) than the first DATA frame (1), so the browser knows this belongs to a different resource and can process it independently. The same happens for TCP packet 3, where the DATA frame stream ids are used to "de-multiplex" the response chunks to their correct resource "streams". 
@@ -116,14 +116,14 @@ I think you'll agree that, with HTTP/2's frames and its prioritization setup, it
 
 As it turns out, HTTP/2 only solved HOL blocking at the HTTP level, what we might call "Application Layer" HOL blocking. There are however other layers below that to consider in the typical networking model. You can see this clearly in Figure 6:
 
-[TODO: Figure 6]
+![the top few protocol layers in the typical networking model](https://github.com/rmarx/holblocking-blogpost/raw/master/images/6_layers.png)
 *Figure 6: the top few protocol layers in the typical networking model.*
 
 HTTP is at the top, but is supported first by TLS at the Security Layer (see the [Bonus TLS section](#sec_tls)), which in turn is carried by TCP at the Transport layer. Each of these protocols wrap the data from the layer above it with some metadata (for example the TCP packet header is prepended to our HTTP data, while that then gets put inside an IP packet etc.). This allows for a relatively neat separation between the protocols. This in turn is good for their re-usability: a Transport Layer protocol like TCP doesn't have to care about what type of data it is transporting (it could be HTTP, it could be FTP, it could be SSH, who knows), and IP works fine for both TCP and UDP. 
 
 This does however have important consequences if we want to multiplex multiple HTTP/2 resources onto one TCP connection. Consider Figure 7:
 
-[TODO: Figure 7]
+![difference in perspective between HTTP/2 and TCP](https://github.com/rmarx/holblocking-blogpost/raw/master/images/7_H2_bytetracking.png)
 *Figure 7: difference in perspective between HTTP/2 and TCP*
 
 While both we and the browser understand we are fetching JavaScript and CSS files, even HTTP/2 doesn't (need to) know that. All it knows is that it is working with chunks from different resource stream ids. However, **TCP doesn't even know that it's transporting HTTP!** All TCP knows is that it has been given a series of bytes that it has to transport from one computer to another, for which it uses packets of a certain maximum size. Each packet just tracks which part of the data (byte range) it carries so the original data can be reconstructed in the correct order.  
@@ -184,7 +184,7 @@ I'm pretty sure you can by now predict how we can solve TCP's issues, right? Aft
 
 While this is indeed simple enough in concept, in practice it has taken over 6 years to get this approach ready for prime-time in the new QUIC Transport Layer protocol and the accompanying HTTP/3. This blogpost is however already way too long to also discuss why this couldn't just be added to TCP instead, why QUIC runs on UDP, and so on. I will instead just focus on the parts that we need to understand our current HOL blocking discussion, which should be easy enough by looking at Figure 8:
 
-[TODO: Figure 8]
+![server HTTP/1.1 vs HTTP/2 vs HTTP/3 response for script.js](https://github.com/rmarx/holblocking-blogpost/raw/master/images/8_H3_1file.png)
 *Figure 8: server HTTP/1.1 vs HTTP/2 vs HTTP/3 response for `script.js`*
 
 We observe that making QUIC aware of the different streams was pretty straightforward. QUIC was inspired by HTTP/2's framing-approach and also adds its own frames; in this case the STREAM frame. Mainly the stream id, which was previously in HTTP/2's DATA frame, is now **moved down to the Transport Layer in QUIC's STREAM frame**. This also shows one of the reasons why we needed a new version of HTTP if we want to use QUIC: if we would just run HTTP/2 on top of QUIC, we would have two (potentially conflicting) "stream layers". HTTP/3 instead removes the stream concept from the HTTP layer and re-uses the underlying QUIC streams instead. 
@@ -193,7 +193,7 @@ We observe that making QUIC aware of the different streams was pretty straightfo
 
 Now that we know about QUIC's STREAM frames, it's also easy to see how they help solve Transport Layer HOL blocking in Figure 9:
 
-[TODO: Figure 9]
+![difference in perspective between TCP and QUIC](https://github.com/rmarx/holblocking-blogpost/raw/master/images/9_H3_bytetracking.png)
 *Figure 9: difference in perspective between TCP and QUIC*
 
 Much like HTTP/2's DATA frames, QUIC's STREAM frames track the byte ranges for each stream individually. This in contrast to TCP, which just appends all stream data in one big blob. Like before, let's consider what would happen if QUIC packet 2 is lost but 1 and 3 arrive. Like with TCP, the data for stream 1 in packet 1 can just be passed to the browser. However, for packet 3, QUIC can be smarter than TCP. It looks at the byte ranges for stream 1 and sees that this STREAM frame perfectly follows the first STREAM frame for stream id 1 (in other words: there are no byte gaps in the data). It can thus give that data to the browser for processing as well. For stream id 2 however, QUIC does see a gap (it hasn't received bytes 0-299 yet, those were in the lost QUIC packet 2). It will hold on to that STREAM frame until the retransmission of QUIC packet 2 arrives. Contrast this again to TCP, which also held back stream 1's data in packet 3!
@@ -211,7 +211,7 @@ This approach has couple of important consequences though.
 - Luckily, if one stream is HOL blocked, we can still make progress on the rest, right?
 - well... if there is "the rest"... Now, resource multiplexing comes into play: sequential vs RR 
 
-[TODO: Figure 10]
+![impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC](https://github.com/rmarx/holblocking-blogpost/raw/master/images/10_H3_scheduler.png)
 *Figure 10: impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC*
 
 - we can see: if sequential = still holblocking, little benefit from QUIC. Only if we have some form of Round-Robin (and preferably not per-packet, because remember loss is bursty!) does it help in practice.
@@ -242,7 +242,7 @@ HTTP/1.1 includes a feature called "pipelining" which is in my opinion often mis
 
 I find it easiest to explain HTTP/1.1 pipelining with an illustration like the one in Bonus Figure 1:
 
-[TODO: Bonus Figure 1]
+![HTTP/1.1 pipelining](https://github.com/rmarx/holblocking-blogpost/raw/master/images/bonus1_H1_pipelining.png)
 *Bonus Figure 1: HTTP/1.1 pipelining*
 
 Without pipelining (left side of Bonus Figure 1), the browser has to wait to send the second resource request until the response for the first request has been completely received (again using Content-Length). This adds one Round-Trip-Time (RTT) of delay for each request, which is bad for Web performance.  
