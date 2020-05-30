@@ -8,9 +8,11 @@ HTTP/3 is promising major performance improvements compared to HTTP/2, mainly be
 
 [quicIntro]: https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/
 
-I'll first introduce the problem and then track different forms of it throughout HTTP's history. To make this post accessible for novices, we will touch on and explain many other aspects of modern Web protocols as well (like prioritization and congestion control). The goal is to help people make correct assumptions about HTTP/3's performance improvements, which might not be as amazing as sometimes claimed in marketing materials. Spoiler: much like the [cake][cake], HOL blocking removal in HTTP/3 is probably a lie and probably won't lead to much speedups in practice.  
+I'll first introduce the problem and then track different forms of it throughout HTTP's history. We will also look how it interacts with other systems like prioritization and congestion control. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which (spoiler) might not be as amazing as sometimes claimed in [marketing materials][cake]. 
 
 [cake]: https://knowyourmeme.com/memes/the-cake-is-a-lie
+
+*Note: this post is a re-write of the first chapter of my upcoming book on QUIC and HTTP/3. If you like this type of content and would like an update when I release more, [leave your email here][signup].*
 
 ## What is Head-of-Line blocking?
 
@@ -146,13 +148,12 @@ Now, you might ask yourself: then what was the point? Why do HTTP/2 at all if we
 
 However, this is mainly true when comparing HTTP/2 on a single connection with HTTP/1.1 on a single connection. As we've seen before, that's not really how it works in practice, as HTTP/1.1 typically opens multiple connections. This allows HTTP/1.1 to somewhat mitigate not only the HTTP-level but also the TCP-level HOL blocking. As such, in some cases, HTTP/2 on a single connection has a hard time being faster than or even as fast as HTTP/1.1 on 6 connections. This is mainly due to TCP's **"congestion control"** mechanism. This is however yet another very deep topic that is not core to our HOL blocking discussion, so I have moved it to [another Bonus section at the end](#sec_cc) for those interested. 
 
-All in all, in practice, we see that (perhaps unexpectedly), HTTP/2 as it is currently deployed in browsers and servers is typically as fast or slightly faster than HTTP/1.1 in most conditions. This is in my opinion partly because websites got better at optimizing for HTTP/2, and partly because browsers often still open multiple parallel HTTP/2 connections (either because sites still [shard their resources over different servers][h2sharding], or because of security-related side-effects), thus getting the best of both worlds.
+All in all, in practice, we see that (perhaps unexpectedly), **HTTP/2 as it is currently deployed in browsers and servers is typically as fast or slightly faster than HTTP/1.1** in most conditions. This is in my opinion partly because websites got better at optimizing for HTTP/2, and partly because browsers often still open multiple parallel HTTP/2 connections (either because sites still [shard their resources over different servers][h2sharding], or because of security-related side-effects), thus getting the best of both worlds.
 
 [h2sharding]: https://twitter.com/zachleat/status/1055219667894259712?s=20
 [almanacH2]: https://almanac.httparchive.org/en/2019/http2
 
-**TODO: link to Barry's H2 chapter in the web almanac**
-**TODO: link to jake archibald's blogpost on "credentialed vs non-credentialed" connections + Matt Hobbs' examples from WPT**
+**TODO: link to jake archibald's blogpost on "credentialed vs non-credentialed" connections + Matt Hobbs' coalescing examples from WPT**
 
 However, there are also some cases (especially on slower networks with higher packet loss) where HTTP/1.1 on 6 connections will still outshine HTTP/2 on one connection, which is often due to the TCP-level HOL blocking problem. It is this fact that was a large motivator for the development of the new QUIC transport protocol as a replacement for TCP. 
 
@@ -168,9 +169,13 @@ After all that, we're finally ready to start talking about the new stuff! But fi
 
 I'm pretty sure you can by now predict how we can solve TCP's issues, right? After all, the solution is quite simple: we "just" need to **make the Transport Layer aware of the different, independent streams** as well! That way, if data for one stream is lost, the Transport itself knows it does not need to hold back the other streams. 
 
-**TODO: add a little bit more QUIC context for novices here. e.g.,: it's fully reliable even though it works on UDP! It integrates TLS (see also bonus section and Figure 6)! It does congestion control! You can see it as a sort of full-fledged TCP 2.0**
+Even though the solution is simple in concept, it has been very difficult to implement in practice. For [various reasons][whyquic], it was impossible to change TCP itself to make it stream-aware. The chosen alternative approach was to implement a completely new Transport Layer protocol in the form of QUIC. To make QUIC practically deployable on the Internet, it runs on top of the unreliable UDP protocol. Yet, very importantly, this does not mean QUIC itself is also unreliable! In many ways, QUIC should be seen as a TCP 2.0. It includes the best versions all of TCP's features (reliability, Congestion Control, Flow Control, ordering, etc.) and many more besides. QUIC also fully integrates TLS (see Figure 6) and doesn't allow unencrypted connections. Because QUIC is so different from TCP, it also means we cannot just run HTTP/2 on top of it, which is why HTTP/3 was created (we will talk about this more in a moment). This blogpost will already be long enough without also discussing QUIC in more detail (see [other][janaQUIC] [sources][quicDetails] [for that][quicComics]), so I will instead just focus on the few parts that we need to understand our current HOL blocking discussion. These are shown in Figure 8:
 
-While this is indeed simple enough in concept, in practice it has taken over 6 years to get this approach ready for prime-time in the new QUIC Transport Layer protocol and the accompanying HTTP/3. This blogpost is however already way too long to also discuss why this couldn't just be added to TCP instead, why QUIC runs on UDP, and so on. I will instead just focus on the parts that we need to understand our current HOL blocking discussion, which should be easy enough by looking at Figure 8:
+[whyquic]: https://www.snia.org/educational-library/quic-%E2%80%93-will-it-replace-tcp-ip-2020
+[janaQUIC]: https://www.youtube.com/watch?v=BazWPeUGS8M
+[quicDetails]: https://www.youtube.com/watch?v=mDc2kHPtavE
+[quicComics]: https://www.youtube.com/watch?v=B1SQFjIXJtc
+
 
 ![server HTTP/1.1 vs HTTP/2 vs HTTP/3 response for script.js](https://github.com/rmarx/holblocking-blogpost/raw/master/images/8_H3_1file.png)
 *Figure 8: server HTTP/1.1 vs HTTP/2 vs HTTP/3 response for `script.js`*
@@ -319,11 +324,14 @@ It is clear that the failure of HTTP/1.1 pipelining was another motivation for H
 <a name="sec_tls"></a>
 ## Bonus: TLS HOL blocking
 
-- TLS encrypts in blocks of up to 16KB for efficiency
-- if the last X of those blocks are lost, we cannot decrypt the first N - X blocks
-- so there is a kind of TLS-specific HOL blocking happening if the final chunks of a TLS record are lost
+**TODO: this needs to be written out**
 
-- this is one of the reasons that QUIC encrypts one packet at a time
+- [TLS encrypts in blocks][tlsSizing] [of up to 16KB for efficiency][tlsSizing2]
+- if the last X of those blocks are lost, we cannot decrypt the first N - X blocks
+- so there is a kind of TLS-specific HOL blocking happening if the final chunk(s) of a TLS record are lost
+
+- QUIC integrates TLS
+- this is one of the reasons that QUIC always encrypts one packet at a time
 - This is less efficient (and one of the main reasons QUIC requires more CPU than TCP), but prevents QUIC-level HOL blocking even in these edge cases.
 
 
@@ -333,32 +341,45 @@ It is clear that the failure of HTTP/1.1 pipelining was another motivation for H
 <a name="sec_congestion"></a>
 ## Bonus: Transport Congestion Control
 
-Transport Layer protocols like TCP and QUIC include a mechanism called Congestion Control. The congestion controller's main job is to make sure the network isn't overloaded by too much data at the same time. If that happens the router buffers start overflowing, causing them to drop packets that don't fit, and we have packet loss. So, what it typically does is start by sending just a little bit of data (usually about 14KB) to see if that makes it through. If the data arrives, the receiver sends acknowledgements back to the sender. As long as all sent data is being acknowledged, the sender doubles its send rate every RTT until a packet loss event is observed (meaning the network is overloaded (a bit) and it needs to back down (a bit)). This is how a TCP connection "probes" for its available bandwidth. Crucially: **this mechanism works for each TCP (and QUIC) connection independently**! This in turn has implications for Web performance at the HTTP layer as well.
+Transport Layer protocols like TCP and QUIC include a mechanism called Congestion Control. The congestion controller's main job is to make sure the network isn't overloaded by too much data at the same time. If that happens the router buffers start overflowing, causing them to drop packets that don't fit, and we have packet loss. So, what it typically does is start by sending just a little bit of data (usually about 14KB) to see if that makes it through. If the data arrives, the receiver sends acknowledgements back to the sender. As long as all sent data is being acknowledged, the sender doubles its send rate every RTT until a packet loss event is observed (meaning the network is overloaded (a bit) and it needs to back down (a bit)). This is how a TCP connection "probes" for its available bandwidth. 
 
-Firstly, this means that HTTP/2's single connection initially only sends 14KB. However, HTTP/1.1's 6 connections each send 14KB in their first flight, which is about 84KB! This will compound over time, as each HTTP/1.1 connection doubles its data use each RTT. Secondly, a connection will only lower its sending rate if there is packet loss. For HTTP/2's single connection, even a single packet loss means it will slow down (in addition to causing TCP HOL blocking!). However, for HTTP/1.1, a single packet loss on just one of the connections will only slow down that one: the other 5 can just keep sending and growing as normal.
+*Note: The description above is just one way to do Congestion Control. Nowadays, other approaches are gaining popularity, main among them the BBR algorithm. Instead of looking directly at packet loss, BBR also heavily takes into account RTT fluctuations to determine if a network is getting overloaded, which means it typically causes fewer packet losses itself by probing bandwidth.*
 
-*Note: BBR*
-**TODO: BBR**
+Crucially: **the congestion control mechanism works for each TCP (and QUIC) connection independently**! This in turn has implications for Web performance at the HTTP layer as well. Firstly, this means that HTTP/2's single connection initially only sends 14KB. However, HTTP/1.1's 6 connections each send 14KB in their first flight, which is about 84KB! This will compound over time, as each HTTP/1.1 connection doubles its data use each RTT. Secondly, a connection will only lower its sending rate if there is packet loss. For HTTP/2's single connection, even a single packet loss means it will slow down (in addition to causing TCP HOL blocking!). However, for HTTP/1.1, a single packet loss on just one of the connections will only slow down that one: the other 5 can just keep sending and growing as normal.
 
 This all makes one thing very clear: **HTTP/2's multiplexing is not the same as HTTP/1.1's downloading resources at the same time**(something which I also still see some people claiming). The available bandwidth of the singular HTTP/2 connection is simply distributed across/shared among the different files, but chunks are still sent sequentially. This is different from HTTP/1.1, where things are sent in a truly parallel fashion. 
 
-By now, you might be wondering: **how then can HTTP/2 ever be faster than HTTP/1.1**? That is a good question, one that I have been asking myself on and off for a long time as well. One obvious answer is in cases where you have -many- more than 6 files. This is how HTTP/2 was marketed back in the day: [by splitting an image into tiny squares and loading those over HTTP/1.1 vs HTTP/2][gophertiles]. This mainly shows off HTTP/2's HOL blocking removal. For normal/real websites however, things get a lot more nuanced quickly. It depends on the amount of resources, their size, the used prioritization/multiplexing scheme, the RTT to the server, how much loss there actually is and when it happens, how much other traffic is on the link at the same time, the used congestion controller logic, etc. One example where HTTP/1.1 can lose is on networks with limited available bandwidth: the 6 HTTP/1.1 connections each grow their send rate individually, causing them to overload the network quite quickly, after which they all have to back down and have to find their co-existent bandwidth limit through trial and error (prior to HTTP/2, [it was thought that HTTP/1.1's parallel connections could be a main cause of packet loss on the Internet][h1packetlossrates]). The single HTTP/2 connection instead grows more slowly, but it is faster to recover after a packet loss event and finds its optimal bandwidth faster.  
-
-[h1packetlossrates]: https://a77db9aa-a-7b23c8ea-s-sites.googlegroups.com/a/chromium.org/dev/spdy/An_Argument_For_Changing_TCP_Slow_Start.pdf
-[gophertiles]: https://http2.golang.org/gophertiles
-
-**TODO: mention that QUIC still has congestion control**
-**other points: QUIC has different streams and you could say each stream is similar to one TCP connection in terms of loss detection.**
-**However: still just a single congestion controller! So it won't be as fast as the 6 HTTP/1.1 connections!**
+By now, you might be wondering: **how then can HTTP/2 ever be faster than HTTP/1.1**? That is a good question, one that I have been asking myself on and off for a long time as well. One obvious answer is in cases where you have -many- more than 6 files. This is how HTTP/2 was marketed back in the day: [by splitting an image into tiny squares and loading those over HTTP/1.1 vs HTTP/2][gophertiles]. This mainly shows off HTTP/2's HOL blocking removal. For normal/real websites however, things get a lot more nuanced quickly. It depends on the amount of resources, their size, the used prioritization/multiplexing scheme, the RTT to the server, how much loss there actually is and when it happens, how much other traffic is on the link at the same time, the used congestion controller logic, etc. One example where HTTP/1.1 can lose is on networks with limited available bandwidth: the 6 HTTP/1.1 connections each grow their send rate individually, causing them to overload the network quite quickly, after which they all have to back down and have to find their co-existent bandwidth limit through trial and error (prior to HTTP/2, [it was thought that HTTP/1.1's parallel connections could be a main cause of packet loss on the Internet][h1packetlossrates]). The single HTTP/2 connection instead grows more slowly, but it is faster to recover after a packet loss event and finds its optimal bandwidth faster. Another, more detailed example with annotated congestion windows where HTTP/2 is faster can be found in [this image][h2cwnd] (not for the faint of heart). 
 
 **TODO: add refs: BBR, prioritization, fairness, etc.**
 
+[h1packetlossrates]: https://a77db9aa-a-7b23c8ea-s-sites.googlegroups.com/a/chromium.org/dev/spdy/An_Argument_For_Changing_TCP_Slow_Start.pdf
+[gophertiles]: https://http2.golang.org/gophertiles
+[h2cwnd]: https://github.com/rmarx/holblocking-blogpost/raw/master/images/bonus_H2vsH1_cwnd.png
 
+QUIC and HTTP/3 will see similar challenges, as like HTTP/2, HTTP/3 will use a single underlying QUIC connection. You might then say that a QUIC connection is conceptually a bit like multiple TCP connections, as each QUIC stream can be seen as one TCP connection, because loss detection is done on a per-stream basis. Crucially however, QUIC's congestion control is still done at the connection level, and not per-stream. This means that even though the streams are conceptually independent, they all still impact QUIC's singular, per-connection congestion controller, causing slowdowns if there is loss on any of the stream. Put differently: the single HTTP/3+QUIC connection still won't grow as fast as the 6 HTTP/1.1 connections, similar to how HTTP/2+TCP over one connection wasn't faster.
 
 <a name="sec_why"></a>
 ## Bonus: Is multiplexing important or not? 
 
-**make point: if multiplexing isn't something you want, then why is HTTP/1.1 bad. Well, boy-o. Mainly the -resource is slow to be generated or become available- use case. or radically different resource sizes. See FOSDEM talk again. **
+**TODO: write this out**
+
+- As discussed for HTTP/3, multiplexing isn't the best approach for Web performance
+- However, there are cases in which it is: for example big differences in file sizes (see HTTP/1.1 section)
+
+[fosdemPrioritization]: TODO
+
+- Mainly though, it's not really about multiplexing active resources. It's the ability to send responses in a different order than they were requested
+- This is important for resources that take a long time to generate (the database-backed index.html we talked about earlier) or to be fetched, in this new CDN-based example:
+
+- Say you request 2 files from a CDN. First one is not cached, needs to be fetched from origin. Second is cached.
+- Over one HTTP/1.1 connection, you'd have to wait for the origin to send 1, and only then send 2
+- Over HTTP/2, you can start sending 2 directly. If 1 starts arriving before 2 is done, you can start injecting that into the response-stream (if wanted).
+- We see that multiplexing 12121212 is indeed rarely what you'd want for Web performance, but the general concept of multiplexing is very powerful and indeed needed.
+
+## Thanks
+
+**TODO: list all reviewers!**
 
 
 
