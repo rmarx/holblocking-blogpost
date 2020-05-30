@@ -180,7 +180,9 @@ After all that, we're finally ready to start talking about the new stuff! But fi
 > - TCP however does not know about these individual "streams" and just sees everything as 1 big stream
 > - If a TCP packet is lost, all later packets need to wait for its retransmission, even if they contain unrelated data from different streams. TCP has Transport Layer HOL blocking.
 
-I'm pretty sure you can by now predict how we can solve TCP's issues, right? After all, the solution is qutie simple: we "just" need to **make the Transport Layer aware of the different, independent streams** as well! That way, if data for one stream is lost, the Transport itself knows it does not need to hold back the other streams. 
+I'm pretty sure you can by now predict how we can solve TCP's issues, right? After all, the solution is quite simple: we "just" need to **make the Transport Layer aware of the different, independent streams** as well! That way, if data for one stream is lost, the Transport itself knows it does not need to hold back the other streams. 
+
+**TODO: add a little bit more QUIC context for novices here. e.g.,: it's fully reliable even though it works on UDP! It integrates TLS (see also bonus section)! It does congestion control! You can see it as a sort of full-fledged TCP 2.0**
 
 While this is indeed simple enough in concept, in practice it has taken over 6 years to get this approach ready for prime-time in the new QUIC Transport Layer protocol and the accompanying HTTP/3. This blogpost is however already way too long to also discuss why this couldn't just be added to TCP instead, why QUIC runs on UDP, and so on. I will instead just focus on the parts that we need to understand our current HOL blocking discussion, which should be easy enough by looking at Figure 8:
 
@@ -196,26 +198,69 @@ Now that we know about QUIC's STREAM frames, it's also easy to see how they help
 ![difference in perspective between TCP and QUIC](https://github.com/rmarx/holblocking-blogpost/raw/master/images/9_H3_bytetracking.png)
 *Figure 9: difference in perspective between TCP and QUIC*
 
-Much like HTTP/2's DATA frames, QUIC's STREAM frames track the byte ranges for each stream individually. This in contrast to TCP, which just appends all stream data in one big blob. Like before, let's consider what would happen if QUIC packet 2 is lost but 1 and 3 arrive. Like with TCP, the data for stream 1 in packet 1 can just be passed to the browser. However, for packet 3, QUIC can be smarter than TCP. It looks at the byte ranges for stream 1 and sees that this STREAM frame perfectly follows the first STREAM frame for stream id 1 (in other words: there are no byte gaps in the data). It can thus give that data to the browser for processing as well. For stream id 2 however, QUIC does see a gap (it hasn't received bytes 0-299 yet, those were in the lost QUIC packet 2). It will hold on to that STREAM frame until the retransmission of QUIC packet 2 arrives. Contrast this again to TCP, which also held back stream 1's data in packet 3!
+Much like HTTP/2's DATA frames, **QUIC's STREAM frames track the byte ranges for each stream individually**. This in contrast to TCP, which just appends all stream data in one big blob. Like before, let's consider what would happen if QUIC packet 2 is lost but 1 and 3 arrive. Like with TCP, the data for stream 1 in packet 1 can just be passed to the browser. However, for packet 3, QUIC can be smarter than TCP. It looks at the byte ranges for stream 1 and sees that this STREAM frame perfectly follows the first STREAM frame for stream id 1 (byte 450 follows byte 499, so there are no byte gaps in the data). It can thus give that data to the browser for processing as well. For stream id 2 however, QUIC does see a gap (it hasn't received bytes 0-299 yet, those were in the lost QUIC packet 2). It will hold on to that STREAM frame until the retransmission of QUIC packet 2 arrives. Contrast this again to TCP, which also held back stream 1's data in packet 3!
 
 Something similar happens in the other situation where packet 1 is lost but 2 and 3 arrive. QUIC knows it has received all expected data for stream 2 and just passed that along to the browser, only holding up stream 1. We can see that for this example, indeed, QUIC solves TCP's HOL blocking!
 
-This approach has couple of important consequences though. 
+This approach has couple of important consequences though. The most impactful one is that **QUIC data might no longer be delivered to the browser in exactly the same order as it was sent**. For TCP, if you send packets 1, 2 and 3, their contents will be delivered in exactly that order to the browser (that's what's causing the HOL blocking in the first place). For QUIC though, in the second example above where packet 1 is lost, the browser instead first sees the contents of packet 2, then the last part of packet 3, then (the retransmission of) packet 1 and then the first part of packet 3. Put differently: QUIC retains ordering within a single resource stream but no longer across individual streams. 
 
-- loss detection is done per stream
-- means that data is no longer deterministically ordered... sent 1 2 3, but arrived 2 3(partial) 1 3(partial)...
-- this in turn is the second, arguably more important reason for HTTP/3: many systems in HTTP/2 really rely on TCP's fully deterministic ordering. HTTP/3 re-imagines both prioritization and header compression for that (HPACK to QPACK).
-- For an in-depth discussion for prioritization, see my paper. For qpack, see dmitri's excellent blogs on the subject. 
+This is the second and arguably most important reason for needing HTTP/3, as it turns out that several systems in HTTP/2 rely -very- heavily on TCP's fully deterministic ordering across streams. For example, HTTP/2's prioritization system works by transmitting operations that change the layout of a tree data structure (for example, add resource 5 as a child of resource 6). If those operations are applied in a different order than they were sent (which would now be possible over QUIC), the client and the server could end up with different prioritization state. Something similar happens for HTTP/2's header compression system HPACK. It's not important to understand the specifics here, just the conclusion: it turns out to be [exceptionally difficult][h3priorities] to adapt these HTTP/2 systems to QUIC directly. As such, **for HTTP/3, some systems use radically different approaches**. For example, QPACK is HTTP/3's version of HPACK and allows a self-chosen trade-off between potential HOL blocking and compression performance. HTTP/2's prioritization system is even completely removed and will probably be replaced with a much simplified version for HTTP/3. All of this because, unlike TCP, QUIC does not fully guarantee that data which is sent first is also received first. 
 
-- Still, it's worth it to remove HOL blocking, right? Well, have we actually removed it? Still have per-stream HOL blocking... that's something we're never going to be able to remove, as we still want resources to be processed in-order. 
-- Luckily, if one stream is HOL blocked, we can still make progress on the rest, right?
-- well... if there is "the rest"... Now, resource multiplexing comes into play: sequential vs RR 
+[h3priorities]: https://h3.edm.uhasselt.be/files/HTTP3_Prioritization_extended_3jul2019.pdf
+**TODO: add dmitri's blogs for qpack discussion**
+
+So, all that work on QUIC and a re-imagined HTTP version just to remove Transport Layer HOL blocking. I sure hope that was worth it... let's explore that. 
+
+### Does QUIC and HTTP/3 really remove HOL blocking? 
+
+If you'll allow me a bit of bad form, I'd like to quote myself from a few paragraphs ago:
+
+> **QUIC retains ordering within a single resource stream**
+
+That's pretty logical when you think about it. It basically says: if you have a JavaScript file, that file needs to be re-assembled exactly as it was created by the developer (or, let's be honest, by webpack), or the code won't work. The same goes for any type of file: putting an image back together in a random order would mean some pretty weird digital Christmas cards from your aunt (even weirder ones). This means that **we still have a form of HOL blocking, even in QUIC**: if there is a byte gap inside a single stream, the latter parts of the stream are still stuck waiting until that gap is filled. 
+
+Put differently, QUIC's HOL blocking removal only works **if there are multiple resource streams active at the same time**. That way, if there is packet loss on one of the streams, the other can still make progress. That's what we've seen in the examples from Figure 9 above. So, the real question is: how often are we in that situation of having multiple simultaneous streams? 
+
+[As explained for HTTP/2](#sec_http2), this is something that can be configured by using an appropriate resource scheduler/multiplexing approach. Streams 1 and 2 can be sent 1122, 2121, 1221, etc. and the browser can specify the scheme it would like the server to follow using the prioritization system (this is still true for HTTP/3). So the browser could say: Hey! I'm noticing heavy packet loss on this connection. I'm going to have the server send me the resources in a 121212 pattern instead of 111222. That way, if a packet for 1 is lost, 2 can still make progress. The problem with this however, is that **the 121212 pattern (or similar) is often not optimal for Web performance**.
+
+This is yet another complex topic that I don't want to get too deep into right now (I do have [an extensive talk on this on YouTube][prioritizationYT] for those interested). However, the basic concept is easy enough to understand with the simple example of the JS and CSS files we've been using. As you probably know, a browser needs to receive -the entire- JS or CSS file before it can actually execute/apply it (some browser can already start compiling/parsing partially downloaded files, but they still need to wait for them to complete before actually using them). Heavily multiplexing resource chunks for those files however will end up delaying them both:
+
+[prioritizationYT]: https://www.youtube.com/watch?v=nH4iRpFnf1c
+
+```
+With multiplexing (slower):
+---------------------------
+                              Stream 1 is only ready to be used here
+                              ▼		
+12121212121212121212121212121212
+                               ▲
+                               Stream 2 is done downloading here
+
+Without multiplexing/sequential (faster for stream 1):
+------------------------------------------------------
+                 Stream 1 is done downloading here and can be used much earlier
+                 ▼			   
+11111111111111111122222222222222
+                               ▲
+                               Stream 2 is still done here
+```
+
+Now, there is a lot of nuance to this topic, and there are certainly situations where the multiplexing approach is faster (for example if one of the files is much smaller than the other one, as discussed early in this post). However, in general for most pages and most resource types, we could say the sequential approach works best (again, see the YouTube link above for too much information on this).
+
+Now, what does this mean? It means we have **two conflicting recommendations for optimal performance**:
+
+> 1) To profit from QUIC's HOL blocking removal: send resources multiplexed (12121212)
+> 2) To make sure browsers can process core resources ASAP: send resources sequentially (11112222)
+
+So which of these is correct? Or at least: which of these should take precedence over the other? Sadly, that's not something I can give you a definitive answer on at this time, as it is a topic of my ongoing research. What I can explain is why it's so difficult to figure this out.
+
+- packet loss is bursty! So can't actually do 121212, need something more like 11111111222222221111111122222222.
 
 ![impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC](https://github.com/rmarx/holblocking-blogpost/raw/master/images/10_H3_scheduler.png)
 *Figure 10: impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC*
 
 - we can see: if sequential = still holblocking, little benefit from QUIC. Only if we have some form of Round-Robin (and preferably not per-packet, because remember loss is bursty!) does it help in practice.
-- Why does this matter? Sequential is thought to be better for web performance... so we usually won't have multiple streams being multiplexed, so we will typically still have per-stream HOL blocking in practice... darned
+
 
 - other points: QUIC has different streams and you could say each stream is similar to one TCP connection in terms of loss detection.
 - However: still just a single congestion controller! So it won't be as fast as the 6 HTTP/1.1 connections!
