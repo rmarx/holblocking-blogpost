@@ -1,28 +1,26 @@
-# Will HTTP/3 really be faster than HTTP/2? Perhaps
+# Head-of-Line Blocking in QUIC and HTTP/3: The Details
 
-As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols are finally approaching official standardization. Preview versions are now [available for testing in servers and browsers alike][h3WithCaddy]. 
+As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols are finally approaching official standardization. Preview versions are now [available for testing in servers and browsers alike][h3Impls]. 
 
-[h3WithCaddy]: https://ma.ttias.be/how-run-http-3-with-caddy-2/
+[h3Impls]: https://en.wikipedia.org/wiki/HTTP/3#Implementations
 
 HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2, so it gives a fantastic insight in the reasons for protocol evolution as well.  
 
-[quicIntro]: https://ma.ttias.be/googles-quic-protocol-moving-web-tcp-udp/
+[quicIntro]: https://http3-explained.haxx.se/en/h3
 
 I'll first introduce the problem and then track different forms of it throughout HTTP's history. We will also look how it interacts with other systems like prioritization and congestion control. The goal is to help people make correct assumptions about HTTP/3's performance improvements, which (spoiler) might not be as amazing as sometimes claimed in [marketing materials][cake]. 
 
 [cake]: https://knowyourmeme.com/memes/the-cake-is-a-lie
 
-*Note: this post is a re-write of the first chapter of my upcoming book on QUIC and HTTP/3. If you like this type of content and would like an update when I release more, [leave your email here][signup].*
-
 ## What is Head-of-Line blocking?
 
-It's difficult to give you a single technical definition of HOL blocking, as this blogpost alone describes four different variations of it. A simple, conceptual definition however would be:
+It's difficult to give you a single technical definition of HOL blocking, as this blogpost alone describes four different variations of it. A simple definition however would be:
 
 > When a single (slow) object prevents other/following objects from making progress
 
-A good real-life metaphore would be a grocery store with just a single check-out counter. One customer who's buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example could be a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at he "head of the line" can "block" the entire line. 
+A good real-life metaphore is a grocery store with just a single check-out counter. One customer buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example is a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at he "head" can "block" the entire "line". 
 
-As it turns out, that concept has been one of the hardest Web performance problems to solve. To understand this, let's start at its incarnation in our trusted workhorse: HTTP version 1.1 
+This concept has been one of the hardest Web performance problems to solve. To understand this, let's start at its incarnation in our trusted workhorse: HTTP version 1.1 
 
 ## HOL blocking in HTTP/1.1
 
@@ -31,24 +29,24 @@ HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be
 ![server HTTP/1.1 response for script.js](https://github.com/rmarx/holblocking-blogpost/raw/master/images/1_H1_1file.png)
 *Figure 1: server HTTP/1.1 response for `script.js`*
 
-In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is really straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content, that's it. Headers + content are then passed down to the underlying TCP (orange) for actual transport to the receiver. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
+In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content or "payload". Headers + payload are then passed down to the underlying TCP (orange) for actual transport to the client. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
 
-*Note: in reality, when using HTTPS, there is another layer in between HTTP and TCP for security with the TLS protocol. However, we omit that in our discussion here for clarity. I did include a [bonus section at the end of this post](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it.* 
+*Note: in reality, when using HTTPS, there is another Security layer in between HTTP and TCP with the TLS protocol. However, we omit that here for clarity. I did include a [bonus section at the end](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it. Feel free to read it afterwards.* 
 
 Now let's see what happens when the browser also requests `style.css` in Figure 2:
 
 ![server HTTP/1.1  response for script.js and style.css](https://github.com/rmarx/holblocking-blogpost/raw/master/images/2_H1_2files.png)
 *Figure 2: server HTTP/1.1  response for `script.js` and `style.css`*
 
-In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. The headers and content for `style.css` are simply appended after the JavaScript (JS) file. The receiver uses the **Content-Length** header for each response to know where one ends and the other starts (in our simplified example, let's pretend `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
+In this case, we are sending `style.css` (purple) after the response for `script.js` has been transmitted. The headers and content for `style.css` are simply appended after the JavaScript (JS) file. The receiver uses the **Content-Length** header to know where each response ends and another starts (in our simplified example, `script.js` is 1000 bytes large, while `style.css` is just 600 bytes).  
 
-All of that seems sensible enough in this simple example with two small files. However, let's imagine a scenario in which the JS file is much larger than CSS (say 1MB instead of 1KB). In this case, the CSS would have to wait before the entire JS file was downloaded, even though it is much smaller and thus could be parsed/used earlier, which can be better for Web performance. If we visualize this a bit more directly, using the number 1 for `large_script.js` and 2 for `style.css`, we would get something like this:
+All of that seems sensible enough in this simple example with two small files. However, imagine a scenario in which the JS file is much larger than CSS (say 1MB instead of 1KB). In this case, the CSS would have to wait before the entire JS file was downloaded, even though it is much smaller and thus could be parsed/used earlier. Visualizing this more directly, using the number 1 for `large_script.js` and 2 for `style.css`, we would get something like this:
 
 > 11111111111111111111111111111111111111122
 
-You can see this is an instance of the Head-of-Line blocking problem! Now you might think: that's easy to solve! Just have the browser request the CSS file before the JS file! Crucially however, the browser has **no way of knowing up-front which of the two will end up being the larger file at request time**, as there is no way to for instance indicate in the HTML how large a file is (this would be lovely, HTML working group: `<img src="thisisfine.jpg" size="15000" />`).  
+You can see this is an instance of the Head-of-Line blocking problem! Now you might think: that's easy to solve! Just have the browser request the CSS file before the JS file! Crucially however, the browser has **no way of knowing up-front which of the two will end up being the larger file at request time**. This is because there is no way to for instance indicate in the HTML how large a file is (something like this would be lovely, HTML working group: `<img src="thisisfine.jpg" size="15000" />`).  
 
-The "real" solution to this problem would be to employ **multiplexing**. If we can cut up each file into smaller pieces (instead of sending them as one big blob), we can "interleave" those chunks on the wire (send a chunk for the JS, one for the CSS, then another for the JS again, etc. until the files are downloaded). With this approach, the smaller CSS file will be downloaded (and usable) much earlier, while only delaying the larger JS file by a bit. Visualized with numbers we would get:
+The "real" solution to this problem would be to employ **multiplexing**. If we can cut up each file's payload into smaller pieces or "chunks", we can mix or "interleave" those chunks on the wire: send a chunk for the JS, one for the CSS, then another for the JS again, etc. until the files are downloaded. With this approach, the smaller CSS file will be downloaded (and usable) much earlier, while only delaying the larger JS file by a bit. Visualized with numbers we would get:
 
 > 12121111111111111111111111111111111111111
 
@@ -57,7 +55,7 @@ Sadly however, this multiplexing is not possible in HTTP/1.1 due to some fundame
 ![server HTTP/1.1 multiplexing for script.js and style.css](https://github.com/rmarx/holblocking-blogpost/raw/master/images/3_H1_2files_multiplexed.png)
 *Figure 3: server HTTP/1.1 multiplexing for `script.js` and `style.css`*
  
-The main problem here is that HTTP/1.1 is a purely textual protocol that only appends headers to the front. It does nothing further to differentiate individual (chunks of) resources from one another. As such, in Figure 3, the browser starts parsing the headers for `script.js` and expects 1000 bytes of response body (the Content-Length). It however only receives 450 JS bytes (the first JS chunk) and then starts reading the headers for `style.css`. It ends up interpreting the CSS headers and the first CSS chunk as part of the JS, as the file contents and headers for both files are just plaintext. Making matters worse, it stops after reading 1000 bytes, ending up somewhere halfway through the second `script.js` chunk. At this point, it doesn't see valid new headers and has to drop the rest of TCP packet 3. The browser then passes this weird text blob to the JS parser, which fails because it's not valid JavaScript:
+The main problem here is that HTTP/1.1 is a purely textual protocol that only appends headers to the front of the payload. It does nothing further to differentiate individual (chunks of) resources from one another. Let's illustrate this with an example of what would happen if we tried it anyway. In Figure 3, the browser starts parsing the headers for `script.js` and expects 1000 bytes of payload to follow (the Content-Length). It however only receives 450 JS bytes (the first chunk) and then starts reading the headers for `style.css`. It ends up interpreting the CSS headers and the first CSS chunk as part of the JS, as the payloads and headers for both files are just plaintext. Making matters worse, it stops after reading 1000 bytes, ending up somewhere halfway through the second `script.js` chunk. At this point, it doesn't see valid new headers and has to drop the rest of TCP packet 3. The browser then passes what it thinks is `script.js` to the JS parser, which fails because it's not valid JavaScript:
 
 ```
 function first() { return "hello"; }
@@ -68,17 +66,17 @@ Content-Length: 600
 func
 ```
 
-Again, you could say there's an easy solution: have the browser look for the `HTTP/1.1 {statusCode} {statusString}\n` pattern to see when a new header starts. That might work for TCP packet 2, but will fail in packet 3: how would the browser know where the green `script.js` chunk ends and the purple `style.css` chunk begins? 
+Again, you could say there's an easy solution: have the browser look for the `HTTP/1.1 {statusCode} {statusString}\n` pattern to see when a new header block starts. That might work for TCP packet 2, but will fail in packet 3: how would the browser know where the green `script.js` chunk ends and the purple `style.css` chunk begins? 
 
-This all is a fundamental limitation of the way the HTTP/1.1 protocol was designed. It means that, if you have a single HTTP/1.1 connection, resource responses always have to be delivered **in-full** before you can switch to sending a new resource. This can lead to severe HOL blocking issues if earlier resources are slow to create (for example a dynamically generated `index.html` that is filled from database queries) or, as above, if earlier resources are simply quite large.
+This is a fundamental limitation of the way the HTTP/1.1 protocol was designed. If you have a single HTTP/1.1 connection, resource responses always have to be delivered **in-full** before you can switch to sending a new resource. This can lead to severe HOL blocking issues if earlier resources are slow to create (for example a dynamically generated `index.html` that is filled from database queries) or, as above, if earlier resources are large.
 
-This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6 nowadays) for each page load over HTTP/1.1. That way, requests could be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... That's where the practice of "sharding" your resources over multiple domains and Content Delivery Networks (CDNs) comes from: as each sharded domain gets 6 connections, browsers will open up to 30-ish TCP connections in total for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server) and takes some time (especially for an HTTPS connection). 
+This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6) for each page load over HTTP/1.1. That way, requests can be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... which is of course quite common. This is where the practice of "sharding" your resources over multiple domains (img.mysite.com, static.mysite.com, etc.) and Content Delivery Networks (CDNs) comes from. As each individual domain gets 6 connections, browsers will open up to 30-ish TCP connections in total for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server) and takes some time (especially for an HTTPS connection). 
 
 [parallelConnections]: http://www.stevesouders.com/blog/2008/03/20/roundup-on-parallel-connections/
 
 As this problem cannot be solved with HTTP/1.1 and the patchwork solution of parallel TCP connections didn't scale too well over time, it was clear a totally new approach was needed, which is what became HTTP/2. 
 
-*Note: the old guard reading this might wonder about HTTP/1.1 pipelining. I decided not to discuss that here to keep the overall story flowing, but people interested in even more technical depth can read the [bonus section at the end of this post](#sec_pipelining).
+*Note: the old guard reading this might wonder about HTTP/1.1 pipelining. I decided not to discuss that here to keep the overall story flowing, but people interested in even more technical depth can read the [bonus section at the end](#sec_pipelining).
 
 <a name="sec_http2"></a>
 ## HOL blocking in HTTP/2 over TCP
