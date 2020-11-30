@@ -31,7 +31,7 @@ HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be
 
 In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content or "payload". Headers + payload are then passed down to the underlying TCP (orange) for actual transport to the client. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
 
-*Note: in reality, when using HTTPS, there is another Security layer in between HTTP and TCP with the TLS protocol. However, we omit that here for clarity. I did include a [bonus section at the end](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it. Feel free to read it afterwards.* 
+*Note: in reality, when using HTTPS, there is another Security layer in between HTTP and TCP with the TLS protocol. However, we omit that here for clarity. I did include a [bonus section at the end](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it. Feel free to read it (and the other bonus sections) after reading the main text.* 
 
 Now let's see what happens when the browser also requests `style.css` in Figure 2:
 
@@ -76,7 +76,7 @@ This is why browsers [started opening multiple parallel TCP connections][paralle
 
 As this problem cannot be solved with HTTP/1.1 and the patchwork solution of parallel TCP connections didn't scale too well over time, it was clear a totally new approach was needed, which is what became HTTP/2. 
 
-*Note: the old guard reading this might wonder about HTTP/1.1 pipelining. I decided not to discuss that here to keep the overall story flowing, but people interested in even more technical depth can read the [bonus section at the end](#sec_pipelining).
+*Note: the old guard reading this might wonder about HTTP/1.1 pipelining. I decided not to discuss that here to keep the overall story flowing, but people interested in even more technical depth can read the [bonus section at the end](#sec_pipelining).*
 
 <a name="sec_http2"></a>
 ## HOL blocking in HTTP/2 over TCP
@@ -199,7 +199,7 @@ This is the second and arguably most important reason for needing HTTP/3, as it 
 [qpack]: https://blog.litespeedtech.com/tag/quic-header-compression-design-team/
 [extensiblepriorities]: https://tools.ietf.org/html/draft-ietf-httpbis-priority-02
 
-So, all that work on QUIC and a re-imagined HTTP version just to remove Transport Layer HOL blocking. I sure hope that was worth it... let's explore that. 
+So, all that work on QUIC and a re-imagined HTTP version just to remove Transport Layer HOL blocking. I sure hope that was worth it...
 
 ### Do QUIC and HTTP/3 really completely remove HOL blocking? 
 
@@ -209,11 +209,11 @@ If you'll allow me a bit of bad form, I'd like to quote myself from a few paragr
 
 That's pretty logical when you think about it. It basically says: if you have a JavaScript file, that file needs to be re-assembled exactly as it was created by the developer (or, let's be honest, by webpack), or the code won't work. The same goes for any type of file: putting an image back together in a random order would mean some pretty weird digital Christmas cards from your aunt (even weirder ones). This means that **we still have a form of HOL blocking, even in QUIC**: if there is a byte gap inside a single stream, the latter parts of the stream are still stuck waiting until that gap is filled. 
 
-Put differently, QUIC's HOL blocking removal only works **if there are multiple resource streams active at the same time**. That way, if there is packet loss on one of the streams, the other can still make progress. That's what we've seen in the examples from Figure 9 above. So, the real question is: **how often are we in that situation of having multiple simultaneous streams?** 
+This has a crucial implication: QUIC's HOL blocking removal only works **if there are multiple resource streams active at the same time**. That way, if there is packet loss on one of the streams, the others can still make progress. That's what we've seen in the examples from Figure 9 above. However, if there is only a single stream active at a given moment, any loss will impact that lonely stream and we will still be HOL blocked, even in QUIC. So, the real question is: **how often are we in the situation of having multiple simultaneous streams?** 
 
-[As explained for HTTP/2](#sec_http2), this is something that can be configured by using an appropriate resource scheduler/multiplexing approach. Streams 1 and 2 can be sent 1122, 2121, 1221, etc. and the browser can specify the scheme it would like the server to follow using the prioritization system (this is still true for HTTP/3). So the browser could say: Hey! I'm noticing heavy packet loss on this connection. I'm going to have the server send me the resources in a 121212 pattern instead of 111222. That way, if a packet for 1 is lost, 2 can still make progress. The problem with this however, is that **the 121212 pattern (or similar) is often not optimal for resource loading performance**.
+[As explained for HTTP/2](#sec_http2), this is something that can be configured by using an appropriate resource scheduler/multiplexing approach. Streams 1 and 2 can be sent 1122, 2121, 1221, etc. and the browser can specify the scheme it would like the server to follow using the prioritization system (this is still true for HTTP/3). So the browser could say: Hey! I'm noticing heavy packet loss on this connection. I'm going to have the server send me the resources in a 121212 pattern instead of 111222. That way, if a single packet for 1 is lost, 2 can still make progress. The problem with this however, is that **the 121212 pattern (or similar) is often not optimal for resource loading performance**.
 
-This is yet another complex topic that I don't want to get too deep into right now (I do have [an extensive talk on this on YouTube][prioritizationYT] for those interested). However, the basic concept is easy enough to understand with the simple example of the JS and CSS files we've been using. As you probably know, a browser needs to receive -the entire- JS or CSS file before it can actually execute/apply it (some browser can already start compiling/parsing partially downloaded files, but they still need to wait for them to complete before actually using them). Heavily multiplexing resource chunks for those files however will end up delaying them both:
+This is yet another complex topic that I don't want to get too deep into right now (I do have [an extensive talk on this on YouTube][prioritizationYT] for those interested). However, the basic concept is easy enough to understand with our simple example of the JS and CSS files. As you probably know, a browser needs to receive -the entire- JS or CSS file before it can actually execute/apply it (while some browsers can already start compiling/parsing partially downloaded files, they still need to wait for them to complete before actually using them). Heavily multiplexing resource chunks for those files however will end up delaying them both:
 
 [prioritizationYT]: https://www.youtube.com/watch?v=nH4iRpFnf1c
 
@@ -244,24 +244,22 @@ Now, what does this mean? It means we have **two conflicting recommendations for
 
 So which of these is correct? Or at least: which of these should take precedence over the other? Sadly, that's not something I can give you a definitive answer on at this time, as it is a topic of my ongoing research. The main reason why this is difficult is because **packet loss patterns are difficult to predict**.
 
-As we've discussed before, packet loss is often bursty and grouped. This means that our example above of 12121212 is already too simplified. Figure 10 gives an overview that's a little bit more realistic (for full realism, the second flight should include retransmits of the lost data, but let's abstract that out for now):
+As we've discussed above, packet loss is often bursty and grouped. This means that our example above of 12121212 is already too simplified. Figure 10 gives an overview that's a little bit more realistic. Here, we assume we have a single burst of 8 lost packets while we are downloading 2 streams (green and purple):
 
 ![impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC](https://github.com/rmarx/holblocking-blogpost/raw/master/images/10_H3_scheduler.png)
-*Figure 10: impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC*
+*Figure 10: impact of stream multiplexing on HOL blocking prevention in HTTP/3 over QUIC. Each rectangle is a separate TCP packet carrying data for one stream. The red crosses indicate the lost packets.*
 
-Here, we assume we have a single burst of 8 lost packets while we are downloading 2 streams (green and purple). Another new thing is that we're talking about "first and second flight". This is to indicate that a sender typically cannot send all packets it has for a given resource in a single go. It will instead send a first group of packets (the first flight), wait for their receipt to be acknowledged by the receiver, and then send the next group of packets (the second flight). For more context, see the [Bonus section on Congestion Control](#sec_cc).
+In the top row of Figure 10, we see the sequential case that is (usually) better for resource loading performance. Here, we see that QUIC's HOL blocking removal indeed doesn't really help all that much: the received green packets after the loss cannot be processed by the browser as they belong to the same stream that experienced the loss. The data for the second (purple) stream hasn't been received yet, so it cannot be processed. 
 
-In the top row of Figure 10, we see the sequential case that is (usually) better for resource loading performance. Here, we see that QUIC's HOL blocking removal doesn't really help all that much: the received packets at the end of the first flight cannot be processed by the browser as they belong to the same stream that experienced the loss.   
+This is different from the middle row, where (by chance!) the 8 lost packets are all from the green stream. This means that the received purple packets at the end now -can- be processed by the browser. However, as discussed before, the browser probably won't benefit from that all too much if it's a JS or CSS file, if there is more purple data coming. So here, we profit from QUIC's HOL blocking removal, but at the possible expense of resource loading performance.
 
-This is different from the middle row, where (by chance!) the 8 lost packets are all from the green stream. This means that the purple packets at the end of the first flight now -can- be processed by the browser. However, as discussed before, the browser probably won't benefit from that all too much if it's a JS or CSS file, as there is more purple data coming in the second flight. So here, we profit from QUIC's HOL blocking removal, but at the possible expense of resource loading performance.
+The bottom row is pretty much the worst case. The 8 lost packets are distributed across the two streams. This means that both streams are now HOL blocked: not because they're waiting on each other, as would be the case with TCP, but because each stream still needs to be ordered by itself. 
 
-The bottom row is pretty much the worst case. The 8 lost packets are distributed across the two streams. This means that both streams are now HOL blocked (not because they're waiting on each other, as would be the case with TCP, but because each stream still needs to be ordered by itself). In addition, it's also bad for overall resource loading performance, as both resources only complete at the end of the second flight. 
-
-*Note: this is also why most QUIC implementations very rarely create packets containing data from more than 1 stream (for example, with 3 small STREAM frames, each for a different stream id). If one of those packets is lost, it immediately leads to HOL blocking for all three streams!*
+*Note: this is also why most QUIC implementations very rarely create packets containing data from more than 1 stream at the same time. If one of those packets is lost, it immediately leads to HOL blocking for all streams in the single packet!*
 
 So, we see that there is potentially some kind of a sweet spot (the middle row) where the **trade-off between HOL blocking prevention and resource loading performance might be worth it**. However, as we said, the loss pattern is difficult to predict. It won't always be 8 packets. They won't always be the same 8 packets. If we get it wrong and the lost packets are shifted just one to the left, we suddenly also have 1 purple packet missing, which basically demotes us down to something similar to the bottom row...
 
-I think you will agree with me that that sounds quite complex to get working, probably even too complex. And even then, the question is how much it would help (at least for web page loading performance). As discussed before, packet loss is typically relatively rare on many network types, possibly (probably?) too rare to see an actual impact from QUIC's HOL blocking removal. On the other end, [it has been well documented][cloudflarePriorities] that multiplexing resources packet-per-packet (bottom row of Figure 10) is quite bad for resource loading performance, no matter if you're using HTTP/2 or HTTP/3. 
+I think you will agree with me that that sounds quite complex to get working, probably even too complex. And even then, the question is how much it would help. As discussed before, packet loss is typically relatively rare on many network types, possibly (probably?) too rare to see much of an impact from QUIC's HOL blocking removal. On the other end, [it has been well documented][cloudflarePriorities] that multiplexing resources packet-per-packet (bottom row of Figure 10) is quite bad for resource loading performance, no matter if you're using HTTP/2 or HTTP/3. 
 
 [cloudflarePriorities]: https://blog.cloudflare.com/better-http-2-prioritization-for-a-faster-web/
 
@@ -274,21 +272,17 @@ As such, one might say that while QUIC and HTTP/3 no longer suffer from Applicat
 <a name="sec_conclusion"></a>
 ## Summary and Conclusion
 
-In this (long, I know) post, we have tracked HOL blocking through time. We first discussed why HTTP/1.1 suffers from Application Layer HOL blocking. This is mainly because HTTP/1.1 does not have a way to identify chunks of individual resources and thus also can't multiplex them. We then saw how HTTP/2 uses frames to mark those chunks and enables multiplexing. This solves HTTP/1.1's problem, but HTTP/2 is sadly still limited by the underlying TCP. Because TCP abstracts the HTTP/2 data as a single, ordered, but opaque stream, it will suffer a form of HOL blocking if packets are lost or severely delayed on the network. QUIC solves this by bringing some of HTTP/2's concepts down into the Transport layer. This in turn has severe repercussions, as data across streams is no longer fully ordered. This eventually led to the need for an the entirely new version 3 of HTTP, which only runs on top of QUIC (while HTTP/2 only runs on top of TCP, see also Figure 6).
+In this (long, I know) post, we have tracked HOL blocking through time. We first discussed why HTTP/1.1 suffers from Application Layer HOL blocking. This is mainly because HTTP/1.1 does not have a way to identify chunks of individual resources. HTTP/2 uses frames to mark those chunks and enables multiplexing. This solves HTTP/1.1's problem, but HTTP/2 is sadly still limited by the underlying TCP. Because TCP abstracts the HTTP/2 data as a single, ordered, but opaque stream, it will suffer a form of HOL blocking if packets are lost or severely delayed on the network. QUIC solves this by bringing some of HTTP/2's concepts down into the Transport layer. This in turn has severe repercussions, as data across streams is no longer fully ordered. This eventually led to the need for an the entirely new version 3 of HTTP, which only runs on top of QUIC (while HTTP/2 only runs on top of TCP, see also Figure 6).
 
 We needed all that context to think critically about how much the HOL blocking removal in QUIC (and thus HTTP/3) will actually help for Web performance in practice. We saw that it would probably only have a large impact on networks with a lot of packet loss. We also discussed why, even then, you would need to multiplex resources and get lucky with how loss impacts that multiplexing. We saw why that might actually do more harm than good, as resource multiplexing is typically not the best idea for Web performance overall. We concluded that, while it's a bit early to tell for sure, **QUIC and HTTP/3's HOL blocking removal probably won't do all that much for Web performance in the majority of the cases**. 
 
 So... where does that leave us Web performance afficionados? Ignore QUIC and HTTP/3 and stick with HTTP/2 + TCP? I sure hope not! **I still believe HTTP/3 will be faster than HTTP/2 overall**, as QUIC also includes other performance improvements. It for example has less overhead on the wire than TCP, is much more flexible in terms of [Congestion Control](#sec_cc) and, most importantly, has the 0-RTT connection establishment feature. I feel that **especially 0-RTT will be the feature that provides the most Web performance benefits**, though there are plenty of challenges there as well. I will write another blogpost on 0-RTT in the future, but if you can't wait to know more about amplification prevention, replay attacks, initial congestion window size, etc. watch [another of my YouTube lectures][velocity] or read my [recent paper][epiqpaper].
 
 [velocity]: https://youtu.be/pq_xk_Pecu4?t=1335
-[epiqpaper]: https://qlog.edm.uhasselt.be/epiq/files/QUICandH3ImplementationDiversity_Marx_REVIEW9may2020.pdf
+[epiqpaper]: https://qlog.edm.uhasselt.be/epiq/files/QUICImplementationDiversity_Marx_final_11jun2020.pdf
 
-Finally, you should know that I am currently writing a full-length book on all things QUIC and HTTP/3. This blogpost is basically a re-write of the first chapter of that book (which hopefully helps explain its length and depth). If you liked it and would like to be kept up to date on the book and further similar posts, [leave your email adress here][signup] or [follow me on twitter][twitter]. I am also very open for feedback on this post and to hear about what I can improve!
-
-[signup]: TODO
-[twitter]: https://twitter.com/programmingart
-
-Thank you for reading. 
+If you liked all that and want more in the future, please give me a follow on twitter <a href="https://twitter.com/programmingart">@programmingart</a>. 
+Thank you for reading! 
 
 <a name="sec_pipelining"></a>
 ## Bonus: HTTP/1.1 pipelining
