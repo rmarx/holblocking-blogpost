@@ -18,7 +18,7 @@ It's difficult to give you a single technical definition of HOL blocking, as thi
 
 > When a single (slow) object prevents other/following objects from making progress
 
-A good real-life metaphore is a grocery store with just a single check-out counter. One customer buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example is a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at he "head" can "block" the entire "line". 
+A good real-life metaphor is a grocery store with just a single check-out counter. One customer buying a lot of items can end up delaying everyone behind them, as customers are served in a First In, First Out manner. Another example is a highway with just a single lane. One car crash on this road can end up jamming the entire passage for a long time. As such, even a single issue at the "head" can "block" the entire "line". 
 
 This concept has been one of the hardest Web performance problems to solve. To understand this, let's start at its incarnation in our trusted workhorse: HTTP version 1.1 
 
@@ -31,7 +31,7 @@ HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be
 
 In this case, the browser requested the simple `script.js` file (green) over HTTP/1.1, and Figure 1 shows the server's response to that request. We can see that the HTTP aspect itself is straightforward: it just adds some textual "headers" (red) directly in front of the plaintext file content or "payload". Headers + payload are then passed down to the underlying TCP (orange) for actual transport to the client. For this example, let's pretend we cannot fit the entire file into 1 TCP packet and it has to be split up into two parts.
 
-*Note: in reality, when using HTTPS, there is another Security layer in between HTTP and TCP with the TLS protocol. However, we omit that here for clarity. I did include a [bonus section at the end](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it. Feel free to read it (and the other bonus sections) after reading the main text.* 
+*Note: in reality, when using HTTPS, there is another Security layer in between HTTP and TCP, where the TLS protocol is typically used. However, we omit that here for clarity. I did include a [bonus section at the end](#sec_tls) that details a TLS-specific HOL blocking variant and how QUIC prevents it. Feel free to read it (and the other bonus sections) after reading the main text.* 
 
 Now let's see what happens when the browser also requests `style.css` in Figure 2:
 
@@ -251,7 +251,7 @@ As we've discussed above, packet loss is often bursty and grouped. This means th
 
 In the top row of Figure 10, we see the sequential case that is (usually) better for resource loading performance. Here, we see that QUIC's HOL blocking removal indeed doesn't really help all that much: the received green packets after the loss cannot be processed by the browser as they belong to the same stream that experienced the loss. The data for the second (purple) stream hasn't been received yet, so it cannot be processed. 
 
-This is different from the middle row, where (by chance!) the 8 lost packets are all from the green stream. This means that the received purple packets at the end now -can- be processed by the browser. However, as discussed before, the browser probably won't benefit from that all too much if it's a JS or CSS file, if there is more purple data coming. So here, we profit from QUIC's HOL blocking removal, but at the possible expense of resource loading performance.
+This is different from the middle row, where (by chance!) the 8 lost packets are all from the green stream. This means that the received purple packets at the end now -can- be processed by the browser. However, as discussed before, the browser probably won't benefit from that all too much if it's a JS or CSS file, if there is more purple data coming. So here, we profit somewhat from QUIC's HOL blocking removal (as purple isn't blocked by green), but at the possible expense of overall resource loading performance (as multiplexing causes files to complete later).
 
 The bottom row is pretty much the worst case. The 8 lost packets are distributed across the two streams. This means that both streams are now HOL blocked: not because they're waiting on each other, as would be the case with TCP, but because each stream still needs to be ordered by itself. 
 
@@ -282,6 +282,8 @@ So... where does that leave us Web performance afficionados? Ignore QUIC and HTT
 [epiqpaper]: https://qlog.edm.uhasselt.be/epiq/files/QUICImplementationDiversity_Marx_final_11jun2020.pdf
 
 If you liked all that and want more in the future, please give me a follow on twitter <a href="https://twitter.com/programmingart">@programmingart</a>. 
+A "living document" version of this post can be found on <a href="https://github.com/rmarx/holblocking-blogpost">github</a>. Let me know if you have tips on how to improve it!
+
 Thank you for reading! 
 
 <a name="sec_pipelining"></a>
@@ -370,7 +372,7 @@ QUIC and HTTP/3 will see similar challenges, as like HTTP/2, HTTP/3 will use a s
 
 ## Thanks
 
-**TODO: list all reviewers!**
+My thanks goes out to all the people who've reviewed this post ahead of time, including: Andy Davies, Dirkjan Ochtman, Alexander Yu, Lucas Pardue, Joris Herbots, and neko-suki.
 
 
 
