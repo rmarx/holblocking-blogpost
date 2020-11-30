@@ -317,19 +317,17 @@ It is clear that the failure of HTTP/1.1 pipelining was another motivation for H
 <a name="sec_tls"></a>
 ## Bonus: TLS HOL blocking
 
-**TODO: this needs to be written out**
+As we have said above, the TLS protocol provides encryption (and other things) for Application Layer protocols, such as HTTP. It does this by wrapping the data it gets from HTTP into TLS records, which are conceptually similar to HTTP/2 frames or TCP packets, just at the TLS level. They for example include a bit of metadata at the start to indicate how long the record is. This record and its HTTP contents are then encrypted and passed to TCP for transport. 
 
-- [TLS encrypts in blocks][tlsSizing] [of up to 16KB for efficiency][tlsSizing2]
-- if the last X of those blocks are lost, we cannot decrypt the first N - X blocks
-- so there is a kind of TLS-specific HOL blocking happening if the final chunk(s) of a TLS record are lost
+As encryption can be an expensive operation in terms of CPU usage, it is typically a good idea to encrypt a good chunk of data at once, as this is typically more efficient. In practice, TLS can encrypt resources in [blocks of up to 16KB][tlsSizing2], which is enough to fill about 11 typical TCP packets (give or take). 
 
-- QUIC integrates TLS
-- this is one of the reasons that QUIC always encrypts one packet at a time
-- This is less efficient (and one of the main reasons QUIC requires more CPU than TCP), but prevents QUIC-level HOL blocking even in these edge cases.
+Crucially however, TLS needs can only decrypt a record in its entirety, [which is why this form of TLS HOL blocking can occur][tlsSizing]. Imagine that the TLS record was spread out over 11 TCP packets, and the last TCP packet is lost. Since the TLS record is incomplete, it cannot be decrypted, and is thus stuck waiting for the retransmission of the last TCP packet. Note that in this specific case there is no TCP HOL blocking: there are no packets after number 11 that are stuck waiting for the retransmit. Put differently, if we had used plain HTTP instead of HTTPS in this example, the HTTP data from the first 10 packets could have already been moved to the browser for processing. However, because we need the entire 11-packet TLS record to be able to decrypt it, we have a new form of HOL blocking. 
 
+While this is a highly specific case that probably does not happen very frequently in practice, it was still something taken into account when designing the QUIC protocol. As there the goal was to eliminate HOL blocking in all its forms once and for all (or at least as much as possible), even this edge case had to be removed. This is part of the reason why, while QUIC integrates TLS, it will always encrypt data on a per-packet basis and it does not use TLS records directly. As we've seen, this is less efficient and requires more CPU than using larger blocks, and is [one of the main reasons why QUIC can still be slower than TCP in current implementations][fastlyBenchmark]. 
 
 [tlsSizing]: https://www.igvita.com/2013/10/24/optimizing-tls-record-size-and-buffering-latency/
 [tlsSizing2]: https://blog.cloudflare.com/optimizing-tls-over-tcp-to-reduce-latency/
+[fastlyBenchmark]: https://www.fastly.com/blog/measuring-quic-vs-tcp-computational-efficiency
 
 <a name="sec_congestion"></a>
 ## Bonus: Transport Congestion Control
