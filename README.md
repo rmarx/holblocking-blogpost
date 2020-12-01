@@ -4,7 +4,7 @@ As you may have heard, after 4 years of work, the new HTTP/3 and QUIC protocols 
 
 [h3Impls]: https://en.wikipedia.org/wiki/HTTP/3#Implementations
 
-HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2, so it gives a fantastic insight in the reasons for protocol evolution as well.  
+HTTP/3 is promising major performance improvements compared to HTTP/2, mainly because it [changes its underlying transport protocol from TCP to QUIC over UDP][quicIntro]. In this post, we'll be taking an in-depth look at just one of these improvements, namely the removal of the **"Head-of-Line blocking" (HOL blocking) problem**. This is useful because I've read a lot of misconceptions on what this actually means and how much it helps in practice. Solving HOL blocking was also one of the main motivations behind not just HTTP/3 and QUIC but also HTTP/2, so it gives a fantastic insight in the reasons for protocol evolution as well.  
 
 [quicIntro]: https://http3-explained.haxx.se/en/h3
 
@@ -12,6 +12,20 @@ I'll first introduce the problem and then track different forms of it throughout
 
 [cake]: https://knowyourmeme.com/memes/the-cake-is-a-lie
 
+Table of contents:
+1. [What is Head-of-Line blocking?](#sec_what)
+2. [HOL blocking in HTTP/1.1](#sec_http1)
+3. [HOL blocking in HTTP/2 over TCP](#sec_http2)
+4. [HOL blocking in HTTP/3 over QUIC](#sec_http3)
+5. [Summary and Conclusion](#sec_conclusion)
+
+Bonus content:
+- [Bonus: HTTP/1.1 pipelining](#sec_pipelining)
+- [Bonus: TLS HOL blocking](#sec_tls)
+- [Bonus: Transport Congestion Control](#sec_congestion)
+- [Bonus: Is multiplexing important or not?](#sec_why)
+
+<a name="sec_what"></a>
 ## What is Head-of-Line blocking?
 
 It's difficult to give you a single technical definition of HOL blocking, as this blogpost alone describes four different variations of it. A simple definition however would be:
@@ -22,6 +36,7 @@ A good real-life metaphor is a grocery store with just a single check-out counte
 
 This concept has been one of the hardest Web performance problems to solve. To understand this, let's start at its incarnation in our trusted workhorse: HTTP version 1.1 
 
+<a name="sec_http1"></a>
 ## HOL blocking in HTTP/1.1
 
 HTTP/1.1 is a protocol from a simpler time. A time when protocols could still be text-based and readable on the wire. This is illustrated in Figure 1 below:
@@ -70,7 +85,7 @@ Again, you could say there's an easy solution: have the browser look for the `HT
 
 This is a fundamental limitation of the way the HTTP/1.1 protocol was designed. If you have a single HTTP/1.1 connection, resource responses always have to be delivered **in-full** before you can switch to sending a new resource. This can lead to severe HOL blocking issues if earlier resources are slow to create (for example a dynamically generated `index.html` that is filled from database queries) or, as above, if earlier resources are large.
 
-This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6) for each page load over HTTP/1.1. That way, requests can be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... which is of course quite common. This is where the practice of "sharding" your resources over multiple domains (img.mysite.com, static.mysite.com, etc.) and Content Delivery Networks (CDNs) comes from. As each individual domain gets 6 connections, browsers will open up to 30-ish TCP connections in total for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server) and takes some time (especially for an HTTPS connection). 
+This is why browsers [started opening multiple parallel TCP connections][parallelConnections] (typically 6) for each page load over HTTP/1.1. That way, requests can be distributed across those individual connections and there is no more HOL blocking. That is, unless you have more than 6 resources per page... which is of course quite common. This is where the practice of "sharding" your resources over multiple domains (img.mysite.com, static.mysite.com, etc.) and Content Delivery Networks (CDNs) comes from. As each individual domain gets 6 connections, browsers will open up to 30-ish TCP connections in total for each page load. This works, but has considerable overhead: setting up a new TCP connection can be expensive (for example in terms of state and memory at the server, as well as calculations to setup TLS encryption) and takes some time (especially for an HTTPS connection, as TLS requires its own handshake). 
 
 [parallelConnections]: http://www.stevesouders.com/blog/2008/03/20/roundup-on-parallel-connections/
 
@@ -314,16 +329,14 @@ To get around all this, modern browsers do not employ pipelining and will even a
 
 It is clear that the failure of HTTP/1.1 pipelining was another motivation for HTTP/2's radically different approach. Yet, as HTTP/2's prioritization system to steer multiplexing often fails to perform in practice, some browsers have even taken to delaying HTTP/2 resource requests as well to get optimal performance. 
 
-**TODO: add pipelining-in-browsers + prioritization-delaying-in-chrome refs (dig through my papers for these)**
-
 <a name="sec_tls"></a>
 ## Bonus: TLS HOL blocking
 
-As we have said above, the TLS protocol provides encryption (and other things) for Application Layer protocols, such as HTTP. It does this by wrapping the data it gets from HTTP into TLS records, which are conceptually similar to HTTP/2 frames or TCP packets, just at the TLS level. They for example include a bit of metadata at the start to indicate how long the record is. This record and its HTTP contents are then encrypted and passed to TCP for transport. 
+As we have said above, the TLS protocol provides encryption (and other things) for Application Layer protocols, such as HTTP. It does this by wrapping the data it gets from HTTP into TLS records, which are conceptually similar to HTTP/2 frames or TCP packets. They for example include a bit of metadata at the start to indicate how long the record is. This record and its HTTP contents are then encrypted and passed to TCP for transport. 
 
 As encryption can be an expensive operation in terms of CPU usage, it is typically a good idea to encrypt a good chunk of data at once, as this is typically more efficient. In practice, TLS can encrypt resources in [blocks of up to 16KB][tlsSizing2], which is enough to fill about 11 typical TCP packets (give or take). 
 
-Crucially however, TLS needs can only decrypt a record in its entirety, [which is why this form of TLS HOL blocking can occur][tlsSizing]. Imagine that the TLS record was spread out over 11 TCP packets, and the last TCP packet is lost. Since the TLS record is incomplete, it cannot be decrypted, and is thus stuck waiting for the retransmission of the last TCP packet. Note that in this specific case there is no TCP HOL blocking: there are no packets after number 11 that are stuck waiting for the retransmit. Put differently, if we had used plain HTTP instead of HTTPS in this example, the HTTP data from the first 10 packets could have already been moved to the browser for processing. However, because we need the entire 11-packet TLS record to be able to decrypt it, we have a new form of HOL blocking. 
+Crucially however, TLS can only decrypt a record in its entirety, [which is why a form of TLS HOL blocking can occur][tlsSizing]. Imagine that the TLS record was spread out over 11 TCP packets, and the last TCP packet is lost. Since the TLS record is incomplete, it cannot be decrypted, and is thus stuck waiting for the retransmission of the last TCP packet. Note that in this specific case there is no TCP HOL blocking: there are no packets after number 11 that are stuck waiting for the retransmit. Put differently, if we had used plain HTTP instead of HTTPS in this example, the HTTP data from the first 10 packets could have already been moved to the browser for processing. However, because we need the entire 11-packet TLS record to be able to decrypt it, we have a new form of HOL blocking. 
 
 While this is a highly specific case that probably does not happen very frequently in practice, it was still something taken into account when designing the QUIC protocol. As there the goal was to eliminate HOL blocking in all its forms once and for all (or at least as much as possible), even this edge case had to be removed. This is part of the reason why, while QUIC integrates TLS, it will always encrypt data on a per-packet basis and it does not use TLS records directly. As we've seen, this is less efficient and requires more CPU than using larger blocks, and is [one of the main reasons why QUIC can still be slower than TCP in current implementations][fastlyBenchmark]. 
 
@@ -372,8 +385,9 @@ QUIC and HTTP/3 will see similar challenges, as like HTTP/2, HTTP/3 will use a s
 
 ## Thanks
 
-My thanks goes out to all the people who've reviewed this post ahead of time, including: Andy Davies, Dirkjan Ochtman, Alexander Yu, Lucas Pardue, Joris Herbots, and neko-suki.
+My thanks goes out to all the people who've reviewed this post ahead of time, including: Andy Davies, Dirkjan Ochtman, Paul Reilly, Alexander Yu, Lucas Pardue, Joris Herbots, and neko-suki.
 
+All images were custom made using https://www.diagrams.net. The font used is "Myriad Pro Condensed".  
 
 
 
